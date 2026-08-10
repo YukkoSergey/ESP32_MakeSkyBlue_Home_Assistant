@@ -81,7 +81,11 @@ bool MpptBridge::updateOne(int index) {
     String props = _tuyaClient.getDeviceProperties(_devices[index].tuyaDeviceId);
     if (props.length() == 0) return false;
 
-    StaticJsonDocument<4096> doc;
+    // Heap-allocated: a StaticJsonDocument<4096> on the loopTask stack (8 KB
+    // by default) leaves no room for HTTPS/mbedTLS scratch buffers during the
+    // same call and blew the canary in the field. Even with the 16 KB stack
+    // bump we prefer heap for anything this big.
+    DynamicJsonDocument doc(6144);
     DeserializationError err = deserializeJson(doc, props);
     if (err) {
         Serial.printf("[MpptBridge] JSON parse failed for MPPT %d: %s\n", index, err.c_str());
