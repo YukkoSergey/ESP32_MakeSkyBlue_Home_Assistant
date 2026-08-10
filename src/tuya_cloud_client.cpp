@@ -45,7 +45,7 @@ String TuyaCloudClient::sha256Hex(const String &in) {
     return String(out);
 }
 
-bool TuyaCloudClient::updateAccessToken() {
+bool TuyaCloudClient::fetchAccessToken() {
     uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
     String ts = String(nowMs);
     String nonce = makeNonce();
@@ -63,7 +63,7 @@ bool TuyaCloudClient::updateAccessToken() {
     String url = String(_baseUrl) + path;
 
     if (!http.begin(secureClient, url)) return false;
-    
+
     http.addHeader("client_id", _accessId);
     http.addHeader("t", ts);
     http.addHeader("nonce", nonce);
@@ -72,18 +72,54 @@ bool TuyaCloudClient::updateAccessToken() {
 
     int code = http.GET();
     if (code != 200) {
-        Serial.printf("[Tuya] Token fetch failed: %d\n", code);
+        Serial.printf("[Tuya] Token fetch HTTP %d\n", code);
         http.end();
+        // Invalidate cached token on failure to force retry next call.
+        _accessToken = "";
+        _tokenExpiresAtMs = 0;
         return false;
     }
 
     String resp = http.getString();
     StaticJsonDocument<512> doc;
-    deserializeJson(doc, resp);
-    _accessToken = doc["result"]["access_token"].as<String>();
-
+    DeserializationError err = deserializeJson(doc, resp);
     http.end();
+
+    if (err) {
+        Serial.printf("[Tuya] Token parse failed: %s\n", err.c_str());
+        _accessToken = "";
+        _tokenExpiresAtMs = 0;
+        return false;
+    }
+    if (!(doc["success"] | false)) {
+        int codeErr = doc["code"] | 0;
+        const char* msg = doc["msg"] | "";
+        Serial.printf("[Tuya] Token API error code=%d msg=%s\n", codeErr, msg);
+        _accessToken = "";
+        _tokenExpiresAtMs = 0;
+        return false;
+    }
+
+    _accessToken = doc["result"]["access_token"].as<String>();
+    // expire_time comes in seconds (Tuya docs: 7200s = 2h typical).
+    uint32_t expireSec = doc["result"]["expire_time"] | 7200;
+    _tokenExpiresAtMs = nowMs + (uint64_t)expireSec * 1000ULL;
+    Serial.printf("[Tuya] Token acquired, expires in %us\n", (unsigned)expireSec);
     return true;
+}
+
+bool TuyaCloudClient::ensureToken() {
+    uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
+    if (_accessToken.length() > 0
+        && _tokenExpiresAtMs > 0
+        && nowMs + kTokenSafetyMarginMs < _tokenExpiresAtMs) {
+        return true;
+    }
+    return fetchAccessToken();
+}
+
+bool TuyaCloudClient::updateAccessToken() {
+    return fetchAccessToken();
 }
 
 bool TuyaCloudClient::reportDeviceDPs(const String& deviceId, const String& dpCode, int value) {
@@ -99,11 +135,9 @@ bool TuyaCloudClient::reportDeviceDPs(const String& deviceId, const String& dpCo
 }
 
 bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, const String& valueStr, bool isStringValue) {
-    if (_accessToken == "") {
-        if (!updateAccessToken()) {
-            Serial.println("[Tuya] Failed to get access token before request");
-            return false;
-        }
+    if (!ensureToken()) {
+        Serial.println("[Tuya] Failed to get access token before request");
+        return false;
     }
 
     uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
@@ -178,10 +212,20 @@ bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, 
 
     StaticJsonDocument<512> resDoc;
     deserializeJson(resDoc, resp);
-    bool success = resDoc["success"];
-    
+    bool success = resDoc["success"] | false;
+
     if (!success) {
-        Serial.printf("[Tuya] API Error: success=false | Response: %s\n", resp.c_str());
+        int errCode = resDoc["code"] | 0;
+        const char* msg = resDoc["msg"] | "";
+        Serial.printf("[Tuya] API error code=%d msg=%s\n", errCode, msg);
+        // 1010 token invalid, 1011 token expired — invalidate cache so the
+        // next call re-fetches. We don't retry inline: caller loop will hit
+        // us again and by then ensureToken() sees the empty cache.
+        if (errCode == 1010 || errCode == 1011) {
+            _accessToken = "";
+            _tokenExpiresAtMs = 0;
+            Serial.println("[Tuya] Token invalidated, will refresh on next call");
+        }
     }
 
     return success;
@@ -218,9 +262,7 @@ bool TuyaCloudClient::reportDPs(const String& deviceId, const std::vector<TuyaDp
 }
 
 String TuyaCloudClient::getDeviceProperties(const String& deviceId) {
-    if (_accessToken == "") {
-        if (!updateAccessToken()) return "";
-    }
+    if (!ensureToken()) return "";
 
     uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
     String ts = String(nowMs);
@@ -257,7 +299,19 @@ String TuyaCloudClient::getDeviceProperties(const String& deviceId) {
     String resp = http.getString();
     http.end();
 
-    if (httpResponseCode != 200) return "";
+    if (httpResponseCode != 200) {
+        Serial.printf("[Tuya] GET %s -> HTTP %d\n", path.c_str(), httpResponseCode);
+        return "";
+    }
+
+    // Cheap peek: if the body says token expired, invalidate the cache so the
+    // next call refreshes. We don't retry inline — the poll loop will do it.
+    if (resp.indexOf("\"code\":1010") >= 0 || resp.indexOf("\"code\":1011") >= 0) {
+        Serial.println("[Tuya] response indicates token invalid/expired, clearing cache");
+        _accessToken = "";
+        _tokenExpiresAtMs = 0;
+        return "";
+    }
 
     return resp;
 }
