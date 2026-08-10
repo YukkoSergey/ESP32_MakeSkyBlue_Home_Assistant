@@ -92,9 +92,11 @@ bool MpptBridge::updateOne(int index) {
         return false;
     }
 
-    JsonArrayConst arr = doc["result"]["properties"].as<JsonArrayConst>();
+    // Legacy iot-03 status returns result directly as an array of {code,value}.
+    JsonArrayConst arr = doc["result"].as<JsonArrayConst>();
     if (arr.isNull()) {
-        Serial.printf("[MpptBridge] MPPT %d: missing result.properties\n", index);
+        Serial.printf("[MpptBridge] MPPT %d: result is not an array (success=%d)\n",
+                      index, (int)(doc["success"] | false));
         return false;
     }
 

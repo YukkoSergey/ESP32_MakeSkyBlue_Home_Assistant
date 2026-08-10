@@ -226,8 +226,12 @@ String TuyaCloudClient::getDeviceProperties(const String& deviceId) {
     String ts = String(nowMs);
     String nonce = makeNonce();
 
-    // CHANGED PATH for properties
-    String path = "/v1.0/cloud/thing/devices/" + deviceId + "/properties";
+    // Legacy DP status endpoint. The v1.0/cloud/thing/*/properties path only
+    // works for devices with the Standard Instruction Set (Thing Model)
+    // enabled — our MakeSkyBlue MPPTs use the legacy DP set and respond with
+    // code 1108 "uri path invalid" on the Thing Model URL. iot-03/status
+    // returns result as an array of {code,value}.
+    String path = "/v1.0/iot-03/devices/" + deviceId + "/status";
     String bodySha = sha256Hex("");
 
     String canonical = String("GET\n") + bodySha + "\n\n" + path;
