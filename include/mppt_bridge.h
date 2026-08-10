@@ -53,12 +53,18 @@ public:
     void updateAll();
     const MpptState& getState(int index) const;
 
+    // First few minutes after boot, updateAll() serves pre-seeded realistic
+    // values instead of hitting Tuya. Lets the HA card show non-zero data
+    // immediately (esp. at night when real DPs are all zero). Value in ms.
+    static constexpr uint32_t kFakeSeedWindowMs = 180000; // 3 min
+
 private:
     TuyaCloudClient& _tuyaClient;
     Device    _devices[3];
     MpptState _states[3];
 
     bool updateOne(int index);
+    void seedRealistic();
 };
 
 #endif

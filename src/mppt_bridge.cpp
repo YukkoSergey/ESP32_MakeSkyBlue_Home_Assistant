@@ -20,8 +20,41 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
     _devices[0] = {TUYA_MPPT_1_ID};
     _devices[1] = {TUYA_MPPT_2_ID};
     _devices[2] = {TUYA_MPPT_3_ID};
+    seedRealistic();
+}
+
+// Pre-seeded plausible daylight values used during the first
+// kFakeSeedWindowMs after boot. Same numbers as tools/mock_makeskyblue.py
+// so the HA card lights up as soon as we connect — before Tuya poll and
+// even at night when all real DPs are zero.
+void MpptBridge::seedRealistic() {
+    const uint16_t cumSeed[3] = {7715, 6030, 6316};    // matches Tuya electric_total
     for (int i = 0; i < 3; i++) {
-        _states[i] = MpptState{};
+        MpptState s{};
+        s.faultStatus        = 0;                       // normal
+        s.batteryVoltageRaw  = 532;                     // 53.2 V
+        s.batteryCurrentRaw  = 187;                     // 18.7 A
+        s.pvVoltageRaw       = 1453;                    // 145.3 V
+        s.chargePowerRaw     = (uint16_t)(1045 + i*40); // 1045 / 1085 / 1125 W
+        s.temperatureRaw     = (int16_t)(341 + i*3);    // 34.1 / 34.4 / 34.7 C
+        s.cumulativeGenRaw   = cumSeed[i];
+        s.outCurrentRaw      = 196;                     // 19.6 A
+        s.workStatusRaw      = 4;                       // mppt_tracking
+        s.dailyGenRaw        = 47;                      // 4.7 kWh
+
+        s.equalizationVoltRaw = 588;                    // 58.8 V
+        s.floatVoltRaw        = 546;                    // 54.6 V
+        s.outTimeSetRaw       = 1;
+        s.chargeCurrentRaw    = 400;                    // 40.0 A
+        s.lowVoltRaw          = 440;                    // 44.0 V
+        s.recoveryVoltRaw     = 480;                    // 48.0 V
+        s.commAddress         = 1;
+        s.batteryTypeRaw      = 1;                      // lithium
+        s.batteryCells        = 4;
+        s.calibVoltRaw        = 0;
+
+        s.valid = true;
+        _states[i] = s;
     }
 }
 
@@ -153,6 +186,21 @@ bool MpptBridge::updateOne(int index) {
 }
 
 void MpptBridge::updateAll() {
+    // First kFakeSeedWindowMs after boot: serve the seed, don't touch Tuya.
+    static bool announcedReal = false;
+    if (millis() < kFakeSeedWindowMs) {
+        static bool announcedFake = false;
+        if (!announcedFake) {
+            Serial.printf("[MpptBridge] seeded values (fake) for first %u s\n",
+                          (unsigned)(kFakeSeedWindowMs / 1000));
+            announcedFake = true;
+        }
+        return;
+    }
+    if (!announcedReal) {
+        Serial.println("[MpptBridge] seed window over, polling Tuya");
+        announcedReal = true;
+    }
     for (int i = 0; i < 3; i++) {
         if (!updateOne(i)) {
             Serial.printf("[MpptBridge] update MPPT %d failed (keeping last state)\n", i);
