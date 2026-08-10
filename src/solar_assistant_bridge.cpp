@@ -29,13 +29,18 @@ void SolarAssistantBridge::processPendingCommands() {
 
     for (int i = 0; i < virtualMapSize; i++) {
         if (_cache[i].changed) {
-            bool isStr = false;
-            if (!(_cache[i].value.length() > 0 &&
-               ((isdigit(_cache[i].value[0]) || _cache[i].value[0] == '-') &&
-                 (_cache[i].value.indexOf('.') == -1 || _cache[i].value.indexOf('.') != -1)))) {
-                isStr = true;
+            // Treat as number if the whole payload looks numeric (optional sign,
+            // digits, optional single decimal point). Anything else -> string DP.
+            const String& v = _cache[i].value;
+            bool numeric = v.length() > 0;
+            bool seenDot = false;
+            for (unsigned k = 0; k < v.length() && numeric; k++) {
+                char c = v[k];
+                if (k == 0 && (c == '-' || c == '+')) continue;
+                if (c == '.') { if (seenDot) { numeric = false; break; } seenDot = true; continue; }
+                if (!isdigit((unsigned char)c)) numeric = false;
             }
-            toReport.push_back({virtualDeviceMap[i].dpId, _cache[i].value, isStr});
+            toReport.push_back({virtualDeviceMap[i].dpId, v, /*isString=*/!numeric});
         }
     }
 
