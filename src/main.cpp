@@ -1,138 +1,207 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <ArduinoJson.h>
 #include <time.h>
 
+#include "secrets.h"
 #include "tuya_cloud_client.h"
 #include "mppt_bridge.h"
 #include "solar_assistant_bridge.h"
 #include "solar_manager_protocol.h"
-#include "secrets.h"
 
-const char* mqttHost = MQTT_HOST;
-const int   mqttPort  = MQTT_PORT;
+// -----------------------------------------------------------------------------
+// Two MQTT brokers:
+//   * LAN broker  — where Solar Assistant publishes solar_assistant/**
+//                   (subscribe only; used by SolarAssistantBridge)
+//   * HA broker   — where Home Assistant + Solar_Manager listen for msbN/**
+//                   (publish + subscribe; used by three SolarManagerDevice)
+// -----------------------------------------------------------------------------
+static WiFiClient   lanTcp;
+static PubSubClient mqttLan(lanTcp);
+static WiFiClient   haTcp;
+static PubSubClient mqttHa(haTcp);
 
-WiFiClient espClient;
-PubSubClient mqtt(espClient);
+static TuyaCloudClient tuyaClient(TUYA_API_BASE_URL, TUYA_CLIENT_ID, TUYA_CLIENT_SECRET);
+static MpptBridge      mpptBridge(tuyaClient);
+static SolarAssistantBridge saBridge(tuyaClient);
 
-// Використовуємо макроси з secrets.h для правильної ініціалізації підпису
-TuyaCloudClient tuyaClient(TUYA_API_BASE_URL, TUYA_CLIENT_ID, TUYA_CLIENT_SECRET);
-MpptBridge mpptBridge(tuyaClient);
-SolarAssistantBridge saBridge(tuyaClient);
+static SolarManagerDevice smDevices[3] = {
+    SolarManagerDevice(MSB_SERIAL_1, "esp32-1.0.0"),
+    SolarManagerDevice(MSB_SERIAL_2, "esp32-1.0.0"),
+    SolarManagerDevice(MSB_SERIAL_3, "esp32-1.0.0"),
+};
 
-void setup_wifi() {
-    Serial.print("[WiFi] Connecting to ");
-    Serial.println(WIFI_SSID);
+// -----------------------------------------------------------------------------
+// Reconnect state: non-blocking exponential backoff, capped.
+// -----------------------------------------------------------------------------
+struct Reconnect {
+    uint32_t nextAttemptMs = 0;
+    uint32_t backoffMs     = 1000;
+};
+static Reconnect wifiReconnect;
+static Reconnect lanReconnect;
+static Reconnect haReconnect;
+constexpr uint32_t kBackoffMinMs = 1000;
+constexpr uint32_t kBackoffMaxMs = 60000;
+
+static void bumpBackoff(Reconnect& r) {
+    r.backoffMs = min(r.backoffMs * 2, kBackoffMaxMs);
+    r.nextAttemptMs = millis() + r.backoffMs;
+}
+static void resetBackoff(Reconnect& r) {
+    r.backoffMs = kBackoffMinMs;
+    r.nextAttemptMs = 0;
+}
+
+// -----------------------------------------------------------------------------
+// MQTT dispatch. PubSubClient uses a single callback per client, so we route
+// by topic prefix.
+// -----------------------------------------------------------------------------
+static void onHaMessage(char* topic, byte* payload, unsigned int length) {
+    for (auto& dev : smDevices) {
+        if (dev.handleMessage(topic, payload, length)) return;
+    }
+}
+
+static void onLanMessage(char* topic, byte* payload, unsigned int length) {
+    String message;
+    message.reserve(length);
+    for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
+    saBridge.handleMqttMessage(String(topic), message);
+}
+
+// -----------------------------------------------------------------------------
+// WiFi (non-blocking)
+// -----------------------------------------------------------------------------
+static void kickWifi() {
+    uint32_t now = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+        resetBackoff(wifiReconnect);
+        return;
+    }
+    if (now < wifiReconnect.nextAttemptMs) return;
+
+    Serial.printf("[WiFi] connecting to %s (backoff=%u ms)\n", WIFI_SSID, (unsigned)wifiReconnect.backoffMs);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\n[WiFi] Connected.");
+    bumpBackoff(wifiReconnect);
 }
-void syncTime() {
-    Serial.println("[Time] Syncing with NTP...");
+
+// -----------------------------------------------------------------------------
+// Time (non-blocking check — Tuya signing needs sane epoch)
+// -----------------------------------------------------------------------------
+static bool timeReady = false;
+static void kickTime() {
+    if (timeReady) return;
+    time_t now = time(nullptr);
+    if (now > 1700000000) {   // 2023-11-14
+        timeReady = true;
+        Serial.println("[Time] synchronized");
+    }
+}
+static void beginNtp() {
     configTime(0, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
-    time_t now;
-    const time_t minEpoch = 1483228800; 
-    while (true) {
-        now = time(nullptr);
-        if (now > minEpoch) break;
-        Serial.print(".");
-        delay(1000);
-    }
-    Serial.println("\n[Time] NTP synchronized");
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    String topicStr = String(topic);
-    topicStr.trim();
-    String message = "";
-    for (int i = 0; i < length; i++) message += (char)payload[i];
-    message.trim();
+// -----------------------------------------------------------------------------
+// MQTT connect helpers
+// -----------------------------------------------------------------------------
+static bool kickLanMqtt() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    if (mqttLan.connected()) { resetBackoff(lanReconnect); return true; }
+    if (millis() < lanReconnect.nextAttemptMs) return false;
 
-    Serial.printf("\n[MQTT RAW] Topic: [%s] | Msg: [%s]\n", topicStr.c_str(), message.c_str());
+    Serial.printf("[MQTT LAN] connecting %s:%d (backoff=%u)\n",
+                  MQTT_LAN_HOST, MQTT_LAN_PORT, (unsigned)lanReconnect.backoffMs);
+    mqttLan.setServer(MQTT_LAN_HOST, MQTT_LAN_PORT);
+    mqttLan.setCallback(onLanMessage);
 
-    for (int i = 0; i < virtualMapSize; i++) {
-        String mapTopic = String(virtualDeviceMap[i].mqttTopic);
-        mapTopic.trim();
-
-        if (topicStr.equalsIgnoreCase(mapTopic)) {
-            Serial.printf("[V-DEV] Match found! Topic: %s -> DP: %s\n", topicStr.c_str(), virtualDeviceMap[i].tuyaCode);
-        saBridge.handleMqttMessage(topicStr, message);
-            return;
+    bool ok = mqttLan.connect("esp32-lan", MQTT_LAN_USERNAME, MQTT_LAN_PASSWORD);
+    if (!ok) {
+        Serial.printf("[MQTT LAN] connect failed rc=%d\n", mqttLan.state());
+        bumpBackoff(lanReconnect);
+        return false;
     }
-    }
-
-    SolarManagerProtocol::handleMqttMessage(topicStr, message, mqtt);
-}
-void reconnectMQTT() {
-    while (!mqtt.connected()) {
-        Serial.print("[MQTT] Attempting reconnect...");
-        if (mqtt.connect("ESP32_Tuya_Bridge")) {
-            Serial.println("connected");
-
-            // Solar Assistant subscriptions
-            mqtt.subscribe("solar_assistant/total/#");
-            mqtt.subscribe("solar_assistant/inverter_1/#");
-
-            // Solar Manager subscriptions
-            // We need to subscribe to /config, /control/#, /host/# for the device serial
-            // Since we don't have a dynamic serial yet, we'll use a generic pattern or hardcode for now
-            // Better yet: subscribe to # or specific prefixes if known.
-            // But the protocol says the device subscribes to its own /config etc.
-            // For MVP, let's assume the serial is MSB_MPPT_1
-            mqtt.subscribe("MSB_MPPT_1/config");
-            mqtt.subscribe("MSB_MPPT_1/control/#");
-            mqtt.subscribe("MSB_MPPT_1/host/#");
-
-            SolarManagerProtocol::publishOnline(mqtt);
-            } else {
-            Serial.printf("failed, rc=%d. retry in 5s\n", mqtt.state());
-            delay(5000);
-        }
-    }
+    Serial.println("[MQTT LAN] connected");
+    resetBackoff(lanReconnect);
+    mqttLan.subscribe("solar_assistant/total/#");
+    mqttLan.subscribe("solar_assistant/inverter_1/#");
+    return true;
 }
 
+static bool kickHaMqtt() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+    if (mqttHa.connected()) { resetBackoff(haReconnect); return true; }
+    if (millis() < haReconnect.nextAttemptMs) return false;
+
+    Serial.printf("[MQTT HA] connecting %s:%d (backoff=%u)\n",
+                  MQTT_HA_HOST, MQTT_HA_PORT, (unsigned)haReconnect.backoffMs);
+    mqttHa.setServer(MQTT_HA_HOST, MQTT_HA_PORT);
+    mqttHa.setCallback(onHaMessage);
+    mqttHa.setBufferSize(512);
+
+    // Global LWT: single topic can't cover 3 devices, so we use the first as a
+    // health marker and each device republishes 'online' on connect. To publish
+    // 'offline' per device on ungraceful drop we'd need one MQTT client per
+    // device — deferred; a graceful shutdown path (below) covers restarts.
+    bool ok = mqttHa.connect(
+        "esp32-ha", MQTT_HA_USERNAME, MQTT_HA_PASSWORD,
+        (String(MSB_SERIAL_1) + "/online").c_str(), 1, false, "offline"
+    );
+    if (!ok) {
+        Serial.printf("[MQTT HA] connect failed rc=%d\n", mqttHa.state());
+        bumpBackoff(haReconnect);
+        return false;
+    }
+    Serial.println("[MQTT HA] connected");
+    resetBackoff(haReconnect);
+    for (auto& dev : smDevices) {
+        dev.setMqttClient(&mqttHa);
+        dev.onMqttConnected();
+    }
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Setup / loop
+// -----------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
-    setup_wifi();
-    syncTime(); 
-    mqtt.setServer(mqttHost, mqttPort);
-    mqtt.setCallback(mqttCallback);
+    delay(50);
+    Serial.println("\n[Boot] ESP32 Tuya <-> Solar_Manager bridge");
 
-    SolarManagerProtocol::init("MSB_MPPT_1", "1.0.0");
-
-    Serial.println("[Diag] Fetching Tuya device properties...");
-    String props = tuyaClient.getDeviceProperties(TUYA_MUST_DEVICE_ID);
-    if (props != "") {
-        Serial.println("[Diag] Tuya Properties: " + props);
-    } else {
-        Serial.println("[Diag] Failed to fetch properties");
-    }
-
-    Serial.println("[System] Setup complete. Entering loop...");
+    kickWifi();
+    beginNtp();
 }
 
 void loop() {
-    if (!mqtt.connected()) {
-        reconnectMQTT();
-    }
-    mqtt.loop();
+    kickWifi();
+    kickTime();
 
-    static unsigned long lastMpptUpdate = 0;
-    if (millis() - lastMpptUpdate > 10000) { // Increased frequency for telemetry
-        lastMpptUpdate = millis();
+    bool lanOk = kickLanMqtt();
+    bool haOk  = kickHaMqtt();
+
+    if (lanOk) mqttLan.loop();
+    if (haOk)  mqttHa.loop();
+
+    if (!timeReady) return; // Tuya signing needs epoch
+
+    static uint32_t lastMpptPoll = 0;
+    if (millis() - lastMpptPoll > 10000) {
+        lastMpptPoll = millis();
         mpptBridge.updateAll();
     }
 
-    static unsigned long lastSaUpdate = 0;
-    if (millis() - lastSaUpdate > 10000) {
-        lastSaUpdate = millis();
+    static uint32_t lastSaSync = 0;
+    if (lanOk && millis() - lastSaSync > 10000) {
+        lastSaSync = millis();
         saBridge.processPendingCommands();
     }
 
-    SolarManagerProtocol::processPeriodicTasks(mqtt, mpptBridge.getState(0));
+    if (haOk) {
+        for (int i = 0; i < 3; i++) {
+            smDevices[i].tick(mpptBridge.getState(i));
+        }
+    }
 }
-
