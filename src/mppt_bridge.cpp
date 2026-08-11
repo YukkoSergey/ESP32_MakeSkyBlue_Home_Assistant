@@ -36,9 +36,7 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
 // these values. The numbers match the mock emulator (tools/mock_makeskyblue.py)
 // and approximate a typical summer afternoon on a 48 V / 4-cell LiFePO4 system.
 void MpptBridge::seedRealistic() {
-    // Cumulative generation approximated from real device values at debug time
-    // (Tuya raw / 10 to match SM register scale=1 kWh): 771 / 603 / 631 kWh.
-    const uint16_t cumSeed[3] = {772, 603, 632};
+    const uint16_t cumSeed[3] = {7715, 6030, 6316};    // matches Tuya electric_total
     for (int i = 0; i < 3; i++) {
         MpptState s{};
         s.faultStatus        = 0;                        // normal, no fault
