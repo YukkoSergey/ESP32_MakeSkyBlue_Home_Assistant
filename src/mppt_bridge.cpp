@@ -109,14 +109,47 @@ static uint16_t mapBatteryType(JsonArrayConst props) {
     return 0; // lead_acid / unknown -> 0
 }
 
+// Tuya charge_mode string -> Solar_Manager work_status enum
+// (register 0x40000C, makeskybluemppt.json):
+//   0 shutdown  1 pre_charging  2 constant_current  3 constant_voltage
+//   4 mppt_tracking  5 bus_constant_voltage  6 float_charging
+//
+// Mapping derived from field observation (2026-08-11, 48V LiFePO4 system):
+//   mode_1 — seen at night, battery discharging, no PV → shutdown (0)
+//   mode_3 — seen daytime with active PV charging      → constant_current (2) [inferred]
+//   mode_4 — seen daytime with active PV charging      → mppt_tracking (4)   [inferred]
+//   mode_5 — seen daytime, battery at 100%             → float_charging (6)  [inferred]
+//   mode_2 — not yet observed; pre_charging (1) is the logical fit
+//
+// Inferred mappings are best-effort until confirmed against manufacturer
+// documentation. If you observe unexpected values in HA, adjust this table
+// and remove the "inferred" note.
+struct ChargeModeEntry {
+    const char* tuyaMode;
+    uint16_t    smStatus;
+};
+
+static const ChargeModeEntry kChargeModeTable[] = {
+    {"mode_1", 0},  // shutdown           — confirmed: no PV, no charging
+    {"mode_2", 1},  // pre_charging        — inferred: not yet observed
+    {"mode_3", 2},  // constant_current    — inferred: active charging daytime
+    {"mode_4", 4},  // mppt_tracking       — inferred: active charging daytime
+    {"mode_5", 6},  // float_charging      — inferred: battery full, daytime
+};
+static constexpr int kChargeModeTableSize = sizeof(kChargeModeTable) / sizeof(kChargeModeTable[0]);
+
 static uint16_t mapChargeMode(JsonArrayConst props) {
-    // TODO: chargeMode mapping table (Step 4) — for now log & return 0.
     JsonVariantConst v;
     if (!findProp(props, "charge_mode", v) || v.isNull()) return 0;
     const char* s = v.as<const char*>();
-    if (s && s[0]) {
-        Serial.printf("[MpptBridge] charge_mode raw='%s' (mapping TODO)\n", s);
+    if (!s || !s[0]) return 0;
+
+    for (int i = 0; i < kChargeModeTableSize; i++) {
+        if (strcmp(s, kChargeModeTable[i].tuyaMode) == 0) {
+            return kChargeModeTable[i].smStatus;
+        }
     }
+    Serial.printf("[MpptBridge] charge_mode unknown: '%s' — update kChargeModeTable\n", s);
     return 0;
 }
 
