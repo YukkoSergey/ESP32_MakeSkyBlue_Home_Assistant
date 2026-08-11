@@ -36,7 +36,9 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
 // these values. The numbers match the mock emulator (tools/mock_makeskyblue.py)
 // and approximate a typical summer afternoon on a 48 V / 4-cell LiFePO4 system.
 void MpptBridge::seedRealistic() {
-    const uint16_t cumSeed[3] = {7715, 6030, 6316};    // matches Tuya electric_total
+    // Cumulative generation approximated from real device values at debug time
+    // (Tuya raw / 10 to match SM register scale=1 kWh): 771 / 603 / 631 kWh.
+    const uint16_t cumSeed[3] = {772, 603, 632};
     for (int i = 0; i < 3; i++) {
         MpptState s{};
         s.faultStatus        = 0;                        // normal, no fault
@@ -50,14 +52,14 @@ void MpptBridge::seedRealistic() {
         s.workStatusRaw      = 4;                        // mppt_tracking
         s.dailyGenRaw        = 47;                       // 4.7 kWh today
 
-        s.equalizationVoltRaw = 588;                     // 58.8 V
-        s.floatVoltRaw        = 546;                     // 54.6 V
-        s.outTimeSetRaw       = 1;                       // 1 h
-        s.chargeCurrentRaw    = 400;                     // 40.0 A limit
-        s.lowVoltRaw          = 440;                     // 44.0 V cutoff
-        s.recoveryVoltRaw     = 480;                     // 48.0 V recovery
+        s.equalizationVoltRaw = 588;                    // 58.8 V
+        s.floatVoltRaw        = 546;                    // 54.6 V
+        s.outTimeSetRaw       = 1;
+        s.chargeCurrentRaw    = 400;                    // 40.0 A
+        s.lowVoltRaw          = 440;                    // 44.0 V
+        s.recoveryVoltRaw     = 480;                    // 48.0 V
         s.commAddress         = 1;
-        s.batteryTypeRaw      = 1;                       // lithium
+        s.batteryTypeRaw      = 1;                      // lithium
         s.batteryCells        = 4;
         s.calibVoltRaw        = 0;
 
