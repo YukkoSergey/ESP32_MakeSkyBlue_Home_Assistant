@@ -15,14 +15,14 @@ Two independent flows on the same board:
 
 ```
                 Home Assistant                    Tuya Cloud
-              (nc.u-ai.cloud:8443)              (openapi.tuyaeu.com)
+                                                (Tuya OpenAPI)
                      ▲                                   ▲
        msbN/notify   │                       HTTPS       │
        msbN/online   │                       DP writes   │
        msbN/diag     │                                   │
                      │                                   │
-              VPS Mosquitto                              │
-              :31883 (plaintext)                         │
+              Public Mosquitto                           │
+              (plaintext MQTT)                           │
                      ▲                                   │
                      │ TCP                               │
                      │                                   │
@@ -34,7 +34,7 @@ Two independent flows on the same board:
                      │
                      │ MQTT (LAN)
                      ▼
-          LAN Mosquitto 192.168.31.251:1883
+              LAN Mosquitto
                      ▲
                      │
               Solar Assistant

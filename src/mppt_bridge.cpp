@@ -20,36 +20,46 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
     _devices[0] = {TUYA_MPPT_1_ID};
     _devices[1] = {TUYA_MPPT_2_ID};
     _devices[2] = {TUYA_MPPT_3_ID};
+    for (int i = 0; i < 3; i++) {
+        _dailyBaseline[i] = 0;
+        _lastYday[i]      = -1;
+        _baselineSet[i]   = false;
+    }
     seedRealistic();
 }
 
 // Pre-seeded plausible daylight values used during the first
-// kFakeSeedWindowMs after boot. Same numbers as tools/mock_makeskyblue.py
-// so the HA card lights up as soon as we connect — before Tuya poll and
-// even at night when all real DPs are zero.
+// kFakeSeedWindowMs after boot. Added during initial development to allow
+// testing the HA card at night when real Tuya DPs (pv_voltage, bat_current,
+// charge_power) are legitimately zero and the card would appear dead.
+// After the seed window expires, real Tuya data takes over and overwrites
+// these values. The numbers match the mock emulator (tools/mock_makeskyblue.py)
+// and approximate a typical summer afternoon on a 48 V / 4-cell LiFePO4 system.
 void MpptBridge::seedRealistic() {
-    const uint16_t cumSeed[3] = {7715, 6030, 6316};    // matches Tuya electric_total
+    // Cumulative generation approximated from real device values at debug time
+    // (Tuya raw / 10 to match SM register scale=1 kWh): 771 / 603 / 631 kWh.
+    const uint16_t cumSeed[3] = {772, 603, 632};
     for (int i = 0; i < 3; i++) {
         MpptState s{};
-        s.faultStatus        = 0;                       // normal
-        s.batteryVoltageRaw  = 532;                     // 53.2 V
-        s.batteryCurrentRaw  = 187;                     // 18.7 A
-        s.pvVoltageRaw       = 1453;                    // 145.3 V
-        s.chargePowerRaw     = (uint16_t)(1045 + i*40); // 1045 / 1085 / 1125 W
-        s.temperatureRaw     = (int16_t)(341 + i*3);    // 34.1 / 34.4 / 34.7 C
-        s.cumulativeGenRaw   = cumSeed[i];
-        s.outCurrentRaw      = 196;                     // 19.6 A
-        s.workStatusRaw      = 4;                       // mppt_tracking
-        s.dailyGenRaw        = 47;                      // 4.7 kWh
+        s.faultStatus        = 0;                        // normal, no fault
+        s.batteryVoltageRaw  = 532;                      // 53.2 V — battery near full
+        s.batteryCurrentRaw  = 187;                      // 18.7 A — charging
+        s.pvVoltageRaw       = 1453;                     // 145.3 V — mid-day PV
+        s.chargePowerRaw     = (uint16_t)(1045 + i*40); // 1045/1085/1125 W — slightly different per controller
+        s.temperatureRaw     = (int16_t)(341 + i*3);    // 34.1/34.4/34.7 C
+        s.cumulativeGenRaw   = cumSeed[i];               // lifetime kWh
+        s.outCurrentRaw      = 196;                      // 19.6 A output
+        s.workStatusRaw      = 4;                        // mppt_tracking
+        s.dailyGenRaw        = 47;                       // 4.7 kWh today
 
-        s.equalizationVoltRaw = 588;                    // 58.8 V
-        s.floatVoltRaw        = 546;                    // 54.6 V
-        s.outTimeSetRaw       = 1;
-        s.chargeCurrentRaw    = 400;                    // 40.0 A
-        s.lowVoltRaw          = 440;                    // 44.0 V
-        s.recoveryVoltRaw     = 480;                    // 48.0 V
+        s.equalizationVoltRaw = 588;                     // 58.8 V
+        s.floatVoltRaw        = 546;                     // 54.6 V
+        s.outTimeSetRaw       = 1;                       // 1 h
+        s.chargeCurrentRaw    = 400;                     // 40.0 A limit
+        s.lowVoltRaw          = 440;                     // 44.0 V cutoff
+        s.recoveryVoltRaw     = 480;                     // 48.0 V recovery
         s.commAddress         = 1;
-        s.batteryTypeRaw      = 1;                      // lithium
+        s.batteryTypeRaw      = 1;                       // lithium
         s.batteryCells        = 4;
         s.calibVoltRaw        = 0;
 
@@ -99,14 +109,47 @@ static uint16_t mapBatteryType(JsonArrayConst props) {
     return 0; // lead_acid / unknown -> 0
 }
 
+// Tuya charge_mode string -> Solar_Manager work_status enum
+// (register 0x40000C, makeskybluemppt.json):
+//   0 shutdown  1 pre_charging  2 constant_current  3 constant_voltage
+//   4 mppt_tracking  5 bus_constant_voltage  6 float_charging
+//
+// Mapping derived from field observation (2026-08-11, 48V LiFePO4 system):
+//   mode_1 — seen at night, battery discharging, no PV → shutdown (0)
+//   mode_3 — seen daytime with active PV charging      → constant_current (2) [inferred]
+//   mode_4 — seen daytime with active PV charging      → mppt_tracking (4)   [inferred]
+//   mode_5 — seen daytime, battery at 100%             → float_charging (6)  [inferred]
+//   mode_2 — not yet observed; pre_charging (1) is the logical fit
+//
+// Inferred mappings are best-effort until confirmed against manufacturer
+// documentation. If you observe unexpected values in HA, adjust this table
+// and remove the "inferred" note.
+struct ChargeModeEntry {
+    const char* tuyaMode;
+    uint16_t    smStatus;
+};
+
+static const ChargeModeEntry kChargeModeTable[] = {
+    {"mode_1", 0},  // shutdown           — confirmed: no PV, no charging
+    {"mode_2", 1},  // pre_charging        — inferred: not yet observed
+    {"mode_3", 2},  // constant_current    — inferred: active charging daytime
+    {"mode_4", 4},  // mppt_tracking       — inferred: active charging daytime
+    {"mode_5", 6},  // float_charging      — inferred: battery full, daytime
+};
+static constexpr int kChargeModeTableSize = sizeof(kChargeModeTable) / sizeof(kChargeModeTable[0]);
+
 static uint16_t mapChargeMode(JsonArrayConst props) {
-    // TODO: chargeMode mapping table (Step 4) — for now log & return 0.
     JsonVariantConst v;
     if (!findProp(props, "charge_mode", v) || v.isNull()) return 0;
     const char* s = v.as<const char*>();
-    if (s && s[0]) {
-        Serial.printf("[MpptBridge] charge_mode raw='%s' (mapping TODO)\n", s);
+    if (!s || !s[0]) return 0;
+
+    for (int i = 0; i < kChargeModeTableSize; i++) {
+        if (strcmp(s, kChargeModeTable[i].tuyaMode) == 0) {
+            return kChargeModeTable[i].smStatus;
+        }
     }
+    Serial.printf("[MpptBridge] charge_mode unknown: '%s' — update kChargeModeTable\n", s);
     return 0;
 }
 
@@ -154,10 +197,37 @@ bool MpptBridge::updateOne(int index) {
     next.chargePowerRaw = (uint16_t)powerW;
 
     next.temperatureRaw      = propI16(arr, "temp_current");
-    next.cumulativeGenRaw    = propU16(arr, "electric_total");
+
+    // electric_total: Tuya raw unit is 0.1 kWh (e.g. 7715 = 771.5 kWh).
+    // Solar_Manager register 0x40000A has scale=1 kWh, so divide by 10.
+    long etRaw = 0;
+    JsonVariantConst etv;
+    if (findProp(arr, "electric_total", etv) && !etv.isNull()) etRaw = etv.as<long>();
+    next.cumulativeGenRaw = (uint16_t)(etRaw / 10);
+
+    // Daily generation: delta from midnight baseline using the same 0.1 kWh
+    // raw unit as electric_total. SM register 0x40001A has scale=0.1 kWh so
+    // the value passes through unchanged — no extra conversion needed.
+    {
+        time_t now = time(nullptr);
+        struct tm* t = localtime(&now);
+        int yday = t ? t->tm_yday : -1;
+
+        if (!_baselineSet[index] || yday != _lastYday[index]) {
+            // First poll ever, or day rolled over — reset baseline.
+            _dailyBaseline[index] = (uint16_t)etRaw;
+            _lastYday[index]      = yday;
+            _baselineSet[index]   = true;
+        }
+
+        long delta = etRaw - (long)_dailyBaseline[index];
+        if (delta < 0) delta = 0;          // counter wrap / clock jump guard
+        if (delta > 0xFFFF) delta = 0xFFFF;
+        next.dailyGenRaw = (uint16_t)delta;
+    }
+
     next.outCurrentRaw       = 0;    // not exposed by Tuya
     next.workStatusRaw       = mapChargeMode(arr);
-    next.dailyGenRaw         = 0;    // TODO: derive from cumulative delta
 
     next.equalizationVoltRaw = propU16(arr, "equalization_volt");
     next.floatVoltRaw        = propU16(arr, "float_charg_volt");

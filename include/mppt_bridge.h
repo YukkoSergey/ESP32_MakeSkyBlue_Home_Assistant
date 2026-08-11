@@ -53,15 +53,22 @@ public:
     void updateAll();
     const MpptState& getState(int index) const;
 
-    // First few minutes after boot, updateAll() serves pre-seeded realistic
-    // values instead of hitting Tuya. Lets the HA card show non-zero data
-    // immediately (esp. at night when real DPs are all zero). Value in ms.
-    static constexpr uint32_t kFakeSeedWindowMs = 180000; // 3 min
+    // Seed values disabled. Non-zero "live" data during first poll interval
+    // is more confusing than helpful — 0 indicates "not yet received".
+    // Enable with a positive value (e.g. 180000 for 3 min) if needed for debug.
+    static constexpr uint32_t kFakeSeedWindowMs = 0;
 
 private:
     TuyaCloudClient& _tuyaClient;
     Device    _devices[3];
     MpptState _states[3];
+
+    // Daily generation tracking. Tuya electric_total is in 0.1 kWh; the
+    // delta since midnight is stored directly as dailyGenRaw (SM 0x40001A
+    // scale=0.1 kWh — same unit, no conversion needed).
+    uint16_t _dailyBaseline[3];  // electric_total raw at start of UTC day
+    int      _lastYday[3];       // day-of-year when baseline was captured
+    bool     _baselineSet[3];    // false until first successful poll
 
     bool updateOne(int index);
     void seedRealistic();

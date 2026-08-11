@@ -193,20 +193,12 @@ bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, 
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Content-Sha256", bodySha);
 
-    Serial.printf("[Tuya-DEBUG] POST to: %s\n", url.c_str());
-    Serial.printf("[Tuya-DEBUG] DeviceID: %s\n", deviceId.c_str());
-    Serial.printf("[Tuya-DEBUG] Body: %s\n", body.c_str());
-
     int httpResponseCode = http.POST(body);
     String resp = http.getString();
-
-    Serial.printf("[Tuya-DEBUG] HTTP Status: %d\n", httpResponseCode);
-    Serial.printf("[Tuya-DEBUG] Response: %s\n", resp.c_str());
-
     http.end();
 
     if (httpResponseCode != 200) {
-        Serial.printf("[Tuya] HTTP Error: %d | Response: %s\n", httpResponseCode, resp.c_str());
+        Serial.printf("[Tuya] POST %s -> HTTP %d\n", path.c_str(), httpResponseCode);
         return false;
     }
 
