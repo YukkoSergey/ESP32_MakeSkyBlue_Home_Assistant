@@ -63,6 +63,13 @@ private:
     Device    _devices[3];
     MpptState _states[3];
 
+    // Daily generation tracking. Tuya electric_total is in 0.1 kWh; the
+    // delta since midnight is stored directly as dailyGenRaw (SM 0x40001A
+    // scale=0.1 kWh — same unit, no conversion needed).
+    uint16_t _dailyBaseline[3];  // electric_total raw at start of UTC day
+    int      _lastYday[3];       // day-of-year when baseline was captured
+    bool     _baselineSet[3];    // false until first successful poll
+
     bool updateOne(int index);
     void seedRealistic();
 };

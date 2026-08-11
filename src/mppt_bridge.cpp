@@ -20,6 +20,11 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
     _devices[0] = {TUYA_MPPT_1_ID};
     _devices[1] = {TUYA_MPPT_2_ID};
     _devices[2] = {TUYA_MPPT_3_ID};
+    for (int i = 0; i < 3; i++) {
+        _dailyBaseline[i] = 0;
+        _lastYday[i]      = -1;
+        _baselineSet[i]   = false;
+    }
     seedRealistic();
 }
 
@@ -166,9 +171,30 @@ bool MpptBridge::updateOne(int index) {
     JsonVariantConst etv;
     if (findProp(arr, "electric_total", etv) && !etv.isNull()) etRaw = etv.as<long>();
     next.cumulativeGenRaw = (uint16_t)(etRaw / 10);
+
+    // Daily generation: delta from midnight baseline using the same 0.1 kWh
+    // raw unit as electric_total. SM register 0x40001A has scale=0.1 kWh so
+    // the value passes through unchanged — no extra conversion needed.
+    {
+        time_t now = time(nullptr);
+        struct tm* t = localtime(&now);
+        int yday = t ? t->tm_yday : -1;
+
+        if (!_baselineSet[index] || yday != _lastYday[index]) {
+            // First poll ever, or day rolled over — reset baseline.
+            _dailyBaseline[index] = (uint16_t)etRaw;
+            _lastYday[index]      = yday;
+            _baselineSet[index]   = true;
+        }
+
+        long delta = etRaw - (long)_dailyBaseline[index];
+        if (delta < 0) delta = 0;          // counter wrap / clock jump guard
+        if (delta > 0xFFFF) delta = 0xFFFF;
+        next.dailyGenRaw = (uint16_t)delta;
+    }
+
     next.outCurrentRaw       = 0;    // not exposed by Tuya
     next.workStatusRaw       = mapChargeMode(arr);
-    next.dailyGenRaw         = 0;    // TODO: derive from cumulative delta
 
     next.equalizationVoltRaw = propU16(arr, "equalization_volt");
     next.floatVoltRaw        = propU16(arr, "float_charg_volt");
