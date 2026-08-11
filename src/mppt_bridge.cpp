@@ -24,33 +24,37 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
 }
 
 // Pre-seeded plausible daylight values used during the first
-// kFakeSeedWindowMs after boot. Same numbers as tools/mock_makeskyblue.py
-// so the HA card lights up as soon as we connect — before Tuya poll and
-// even at night when all real DPs are zero.
+// kFakeSeedWindowMs after boot. Added during initial development to allow
+// testing the HA card at night when real Tuya DPs (pv_voltage, bat_current,
+// charge_power) are legitimately zero and the card would appear dead.
+// After the seed window expires, real Tuya data takes over and overwrites
+// these values. The numbers match the mock emulator (tools/mock_makeskyblue.py)
+// and approximate a typical summer afternoon on a 48 V / 4-cell LiFePO4 system.
 void MpptBridge::seedRealistic() {
-    // Tuya electric_total is in 0.1 kWh; divide by 10 to match SM register scale=1 kWh.
+    // Cumulative generation approximated from real device values at debug time
+    // (Tuya raw / 10 to match SM register scale=1 kWh): 771 / 603 / 631 kWh.
     const uint16_t cumSeed[3] = {772, 603, 632};
     for (int i = 0; i < 3; i++) {
         MpptState s{};
-        s.faultStatus        = 0;                       // normal
-        s.batteryVoltageRaw  = 532;                     // 53.2 V
-        s.batteryCurrentRaw  = 187;                     // 18.7 A
-        s.pvVoltageRaw       = 1453;                    // 145.3 V
-        s.chargePowerRaw     = (uint16_t)(1045 + i*40); // 1045 / 1085 / 1125 W
-        s.temperatureRaw     = (int16_t)(341 + i*3);    // 34.1 / 34.4 / 34.7 C
-        s.cumulativeGenRaw   = cumSeed[i];
-        s.outCurrentRaw      = 196;                     // 19.6 A
-        s.workStatusRaw      = 4;                       // mppt_tracking
-        s.dailyGenRaw        = 47;                      // 4.7 kWh
+        s.faultStatus        = 0;                        // normal, no fault
+        s.batteryVoltageRaw  = 532;                      // 53.2 V — battery near full
+        s.batteryCurrentRaw  = 187;                      // 18.7 A — charging
+        s.pvVoltageRaw       = 1453;                     // 145.3 V — mid-day PV
+        s.chargePowerRaw     = (uint16_t)(1045 + i*40); // 1045/1085/1125 W — slightly different per controller
+        s.temperatureRaw     = (int16_t)(341 + i*3);    // 34.1/34.4/34.7 C
+        s.cumulativeGenRaw   = cumSeed[i];               // lifetime kWh
+        s.outCurrentRaw      = 196;                      // 19.6 A output
+        s.workStatusRaw      = 4;                        // mppt_tracking
+        s.dailyGenRaw        = 47;                       // 4.7 kWh today
 
-        s.equalizationVoltRaw = 588;                    // 58.8 V
-        s.floatVoltRaw        = 546;                    // 54.6 V
-        s.outTimeSetRaw       = 1;
-        s.chargeCurrentRaw    = 400;                    // 40.0 A
-        s.lowVoltRaw          = 440;                    // 44.0 V
-        s.recoveryVoltRaw     = 480;                    // 48.0 V
+        s.equalizationVoltRaw = 588;                     // 58.8 V
+        s.floatVoltRaw        = 546;                     // 54.6 V
+        s.outTimeSetRaw       = 1;                       // 1 h
+        s.chargeCurrentRaw    = 400;                     // 40.0 A limit
+        s.lowVoltRaw          = 440;                     // 44.0 V cutoff
+        s.recoveryVoltRaw     = 480;                     // 48.0 V recovery
         s.commAddress         = 1;
-        s.batteryTypeRaw      = 1;                      // lithium
+        s.batteryTypeRaw      = 1;                       // lithium
         s.batteryCells        = 4;
         s.calibVoltRaw        = 0;
 
