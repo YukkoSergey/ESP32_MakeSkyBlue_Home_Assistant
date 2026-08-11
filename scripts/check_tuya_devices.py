@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
-"""Check all Tuya devices and report online/offline status."""
+"""
+Check all Tuya devices and report online/offline status.
+
+Usage:
+    export TUYA_CLIENT_ID="your_client_id"
+    export TUYA_CLIENT_SECRET="your_client_secret"
+    python3 scripts/check_tuya_devices.py
+
+    # Or inline:
+    TUYA_CLIENT_ID=xxx TUYA_CLIENT_SECRET=yyy python3 scripts/check_tuya_devices.py
+
+Credentials:
+    TUYA_CLIENT_ID     — Access ID from Tuya IoT Platform -> Cloud -> your project
+    TUYA_CLIENT_SECRET — Access Secret from the same page
+
+    The script uses Tuya EU region (openapi.tuyaeu.com). If your project is in
+    a different region, change BASE at the top of this file:
+        CN: openapi.tuyacn.com
+        US: openapi.tuyaus.com
+        IN: openapi.tuyain.com
+
+Exit code:
+    0 — all devices online
+    1 — one or more devices offline
+"""
 import hashlib
 import hmac
 import json
