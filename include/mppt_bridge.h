@@ -53,10 +53,10 @@ public:
     void updateAll();
     const MpptState& getState(int index) const;
 
-    // First few minutes after boot, updateAll() serves pre-seeded realistic
-    // values instead of hitting Tuya. Lets the HA card show non-zero data
-    // immediately (esp. at night when real DPs are all zero). Value in ms.
-    static constexpr uint32_t kFakeSeedWindowMs = 180000; // 3 min
+    // Seed values disabled. Non-zero "live" data during first poll interval
+    // is more confusing than helpful — 0 indicates "not yet received".
+    // Enable with a positive value (e.g. 180000 for 3 min) if needed for debug.
+    static constexpr uint32_t kFakeSeedWindowMs = 0;
 
 private:
     TuyaCloudClient& _tuyaClient;
