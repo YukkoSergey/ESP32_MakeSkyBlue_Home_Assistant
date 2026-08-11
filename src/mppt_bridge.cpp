@@ -28,7 +28,8 @@ MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
 // so the HA card lights up as soon as we connect — before Tuya poll and
 // even at night when all real DPs are zero.
 void MpptBridge::seedRealistic() {
-    const uint16_t cumSeed[3] = {7715, 6030, 6316};    // matches Tuya electric_total
+    // Tuya electric_total is in 0.1 kWh; divide by 10 to match SM register scale=1 kWh.
+    const uint16_t cumSeed[3] = {772, 603, 632};
     for (int i = 0; i < 3; i++) {
         MpptState s{};
         s.faultStatus        = 0;                       // normal
@@ -154,7 +155,13 @@ bool MpptBridge::updateOne(int index) {
     next.chargePowerRaw = (uint16_t)powerW;
 
     next.temperatureRaw      = propI16(arr, "temp_current");
-    next.cumulativeGenRaw    = propU16(arr, "electric_total");
+
+    // electric_total: Tuya raw unit is 0.1 kWh (e.g. 7715 = 771.5 kWh).
+    // Solar_Manager register 0x40000A has scale=1 kWh, so divide by 10.
+    long etRaw = 0;
+    JsonVariantConst etv;
+    if (findProp(arr, "electric_total", etv) && !etv.isNull()) etRaw = etv.as<long>();
+    next.cumulativeGenRaw = (uint16_t)(etRaw / 10);
     next.outCurrentRaw       = 0;    // not exposed by Tuya
     next.workStatusRaw       = mapChargeMode(arr);
     next.dailyGenRaw         = 0;    // TODO: derive from cumulative delta
