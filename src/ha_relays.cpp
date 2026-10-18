@@ -2,6 +2,7 @@
 #include "app_log.h"
 #include "settings.h"
 #include "alerts.h"
+#include "secrets.h"   // CMD_SECRET — without it the signed-command path silently compiles out
 #include <ArduinoJson.h>
 
 static const char* kBase             = "dacha_relays";
