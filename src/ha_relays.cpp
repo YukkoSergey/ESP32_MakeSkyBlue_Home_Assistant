@@ -72,6 +72,10 @@ void HaRelays::publishDiscovery() {
                   "{{ 'ON' if value_json.heavy_load else 'OFF' }}", (e + ",\"dev_cla\":\"power\"").c_str());
     publishEntity("binary_sensor", "generator", "Generator relay",
                   "{{ 'ON' if value_json.generator else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
+    publishEntity("binary_sensor", "gen_fb", "Generator running (feedback)",
+                  "{{ 'ON' if value_json.gen_fb_running else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
+    publishEntity("binary_sensor", "gen_no_start", "Generator did not start",
+                  "{{ 'ON' if value_json.gen_no_start else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
     publishEntity("binary_sensor", "soc_frozen", "Battery SOC frozen",
                   "{{ 'ON' if value_json.soc_frozen else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
     publishEntity("binary_sensor", "volt_emergency", "Battery voltage emergency",

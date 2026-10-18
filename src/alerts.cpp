@@ -38,7 +38,7 @@ LPAvTK33sefOT6jEm0pUBsV/fdUID+Ic/n4XuKxe9tQWskMJDE32p2u0mYRlynqI
 -----END CERTIFICATE-----
 )PEM";
 
-static const char* kKeyNames[Alerts::kCount] = {"stale", "frozen", "voltage", "ha_down", "broker_down"};
+static const char* kKeyNames[Alerts::kCount] = {"stale", "frozen", "voltage", "ha_down", "broker_down", "gen_no_start"};
 
 // --- shared between the main loop, the web UI and the Telegram task ----------
 struct OutMsg   { String text; int ackKey; };   // ackKey < 0: no button
@@ -171,8 +171,20 @@ static void tgPoll(const String& token, const String& chat, int64_t& offset) {
     }
 }
 
+// ESP8266: no direct Telegram. api.telegram.org doesn't do TLS Max Fragment
+// Length, so BearSSL needs a ~17 KB receive buffer in one piece and the
+// NodeMCU has ~14-16 KB free — the first attempt crashed the board in a
+// reboot loop. Alerts still go to HA (dacha_relays/alert); a small service
+// next to HA forwards them to Telegram.
+#if defined(ESP8266)
+static const char* kTelegramUnsupported =
+    "NodeMCU не має пам'яті для TLS-з'єднання з Telegram (потрібно ~17 КБ суцільної пам'яті, "
+    "є ~15 КБ, а малі буфери сервер Telegram не підтримує). Тривоги йдуть через HA; у Telegram "
+    "їх пересилатиме сервіс на VPS.";
+#endif
+
 // One step of the Telegram worker: at most one HTTPS call. Driven by a task
-// on ESP32 and by Alerts::service() from loop() on ESP8266.
+// on ESP32 (never on ESP8266, see above).
 static void telegramStep() {
     static int64_t offset = 0;
     static uint32_t lastPoll = 0, retryAt = 0;
@@ -242,12 +254,7 @@ static void telegramTask(void*) {
 #endif
 
 void Alerts::service() {
-#if defined(ESP8266)
-    static uint32_t last = 0;
-    if (millis() - last < 1000) return;
-    last = millis();
-    telegramStep();
-#endif
+    // ESP8266: nothing to do — direct Telegram is disabled there (see above).
 }
 
 // --- Alerts (main loop side) --------------------------------------------------
@@ -258,6 +265,7 @@ const char* Alerts::title(Key k) {
         case VoltEmergency: return "аварійно низька напруга батареї";
         case HaDown:        return "Home Assistant не відповідає";
         case BrokerDown:    return "MQTT-брокер Home Assistant недоступний";
+        case GenNoStart:    return "генератор не працює, хоча плата його запустила";
         default:            return "?";
     }
 }
@@ -288,6 +296,19 @@ void Alerts::begin(ResetKind resetKind) {
 #ifdef TELEGRAM_CHAT_ID
     if (s_chat.isEmpty()) s_chat = TELEGRAM_CHAT_ID;
 #endif
+#if defined(ESP8266)
+    // Never keep a token here: one is what crash-looped the board.
+    if (!s_token.isEmpty()) {
+        Preferences w;
+        w.begin("tg", false);
+        w.putString("token", "");
+        w.putString("chat", "");
+        w.end();
+        s_token = "";
+        s_chat = "";
+    }
+    s_lastError = kTelegramUnsupported;
+#endif
     s_tokenChanged = !s_token.isEmpty();
     Log.printf("[Telegram] %s\n", s_token.isEmpty() ? "not configured — set it up on the web page"
                                   : s_chat.isEmpty() ? "token set, waiting for /start to pick the chat"
@@ -298,6 +319,10 @@ void Alerts::begin(ResetKind resetKind) {
 }
 
 void Alerts::setTelegramToken(const String& token) {
+#if defined(ESP8266)
+    (void)token;
+    return;   // see kTelegramUnsupported
+#endif
     Preferences p;
     p.begin("tg", false);
     p.putString("token", token);
@@ -450,6 +475,22 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         clear(VoltEmergency);
     }
 
+    // Generator commanded but not running (feedback contact).
+    if (r.genNoStartAlarm()) {
+        raise(GenNoStart, "Реле генератора замкнуте вже понад 3 хв, а контакт зворотного зв'язку не замкнувся "
+                          "(або розімкнувся). Генератор не завівся або зупинився сам: перевір паливо, "
+                          "акумулятор генератора і АВР.");
+    } else {
+        clear(GenNoStart);
+    }
+
+    // Real generator start / stop from the feedback contact.
+    if (r.genFeedbackEnabled() && r.genFeedbackRunning() != _lastFbRunning) {
+        _lastFbRunning = r.genFeedbackRunning();
+        send("generator_fb", "info", String("генератор ") + (_lastFbRunning ? "реально ЗАПРАЦЮВАВ" : "реально зупинився"),
+             _lastFbRunning && !r.generatorOn() ? "Плата його не запускала: завели вручну або власна автоматика генератора." : "", -1);
+    }
+
     // HA broker reachability.
     if (haMqttConnected || WiFi.status() != WL_CONNECTED) {
         _haDisconnectedSinceMs = 0;
@@ -531,6 +572,9 @@ void Alerts::fillStatus(JsonObject o) const {
 }
 
 void Alerts::fillTelegram(JsonObject o) const {
+#if defined(ESP8266)
+    o["unsupported"] = kTelegramUnsupported;
+#endif
     lock();
     o["token_set"] = !s_token.isEmpty();
     o["token_hint"] = s_token.length() > 6 ? "…" + s_token.substring(s_token.length() - 4) : String("");

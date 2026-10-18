@@ -166,13 +166,16 @@ async function status(){
    ['Мережа',r.grid_v<0?'—':(r.grid_v>=100?'є, '+r.grid_v+' В':'немає')],
    ['Перевірка застигання',r.frozen_paused?'на паузі (генератор)':`ніч без мережі ${r.frozen_night_wh}/1000 Вт·год · інвертор ${r.frozen_inv_wh}/1500 Вт·год`+(r.night?' · ніч':'')]]);
   kv($('gen'),[
-   ['Реле',onoff(r.generator,'ПРАЦЮЄ','стоїть')],['Режим',MODES[r.gen_mode]],
+   ['Реле (команда)',onoff(r.generator,'ЗАМКНУТЕ','розімкнуте')],
+   ['Генератор (контакт)',r.gen_fb_enabled?(r.gen_fb_running?'<b class="on">ПРАЦЮЄ</b>':'стоїть')+(r.gen_no_start?' <span class="bad">не завівся!</span>':''):'<span class="mute">зворотний зв\'язок вимкнено</span> <button id="fbOn">увімкнути</button>'],
+   ['Режим',MODES[r.gen_mode]],
    ['Авто в цьому сезоні',t.gen_auto?`СТАРТ &lt; ${t.gen_start_kwh} · СТОП &gt; ${t.gen_stop_kwh}`:'вимкнено'],
    ['Мета ручного запуску',t.gen_stop_kwh+' кВт·год'],
    ['Працює',r.generator?r.gen_on_min+' хв':'—'],['Зарядив за сесію',r.gen_session_kwh+' кВт·год'],
    ['До мети',r.gen_eta_h<0?'—':'~'+r.gen_eta_h+' год']]);
   document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('sel',b.dataset.m==r.gen_mode));
   document.querySelectorAll('[data-h]').forEach(b=>b.classList.toggle('sel',b.dataset.h==r.heavy_mode));
+  if($('fbOn'))$('fbOn').onclick=async()=>{if(confirm('Увімкнути зворотний зв\'язок від генератора? Контакт контактора генератора має бути підключений між D5 і G.')){await api('/api/gen_feedback',{method:'POST',body:'on'});status()}};
   lastStatus=j;renderAlarms(j.alerts);renderWhy(r);renderHow();
   kv($('sys'),[
    ['Аптайм',up(s.uptime_s)],['Час',s.local_time||'не синхронізовано'],['WiFi',`${s.wifi_ssid} (${s.wifi_rssi} dBm), ${s.ip}`],
@@ -208,6 +211,8 @@ function renderWhy(r){
  const t=r.thresholds,res=r.reserve_kwh,cap=r.capacity_kwh,sea=SEASONS[r.season];
  const lines=[];
  if(r.volt_emergency)lines.push(`<b class="bad">Аварія за напругою</b>: батарея ${r.inv_battery_v} В, нижче 47 В понад 5 хв. Вона майже порожня, хоч би що показував SOC. Важке навантаження вимкнено, генератор запущено (якщо не заборонений).`);
+ if(r.gen_no_start)lines.push(`<b class="bad">Генератор не працює</b>, хоча реле замкнуте понад 3 хв: контакт зворотного зв'язку не замкнувся. Перевір паливо і сам генератор.`);
+ if(r.gen_fb_enabled&&r.gen_fb_running&&!r.generator)lines.push(`<b class="warn">Генератор працює</b> (контакт замкнутий), хоча плата його не запускала. Важке навантаження вимкнене, поки він працює.`);
  if(r.heavy_mode=='off')lines.push(`<b class="warn">Важке навантаження заборонене вручну.</b> Пороги не діють, доки не натиснеш «Авто».`);
  if(r.heavy_mode=='on')lines.push(`<b class="warn">Важке навантаження дозволене вручну</b>, незалежно від порогів`+(r.heavy_load?'.':', але зараз його вимкнув захист (аварія за напругою або працює генератор).'));
  if(r.charger_detected&&!r.generator)lines.push(`<b class="warn">Працює зарядник генератора</b>, хоча плата його не запускала (BMS бачить на ~${r.charger_w} Вт більше заряду, ніж інвертор). Генератор завели вручну або його власний контролер.`);
@@ -265,6 +270,7 @@ function renderHow(){
 <p>За датою (київський час): <b>зима</b> 1.12–28.02, <b>міжсезоння</b> 1.03–30.04 і 15.10–30.11, <b>літо</b> 1.05–14.10. Сезон можна зафіксувати вручну в «Налаштуваннях». Зараз: ${SEASONS[r.season]} (${r.season_mode=='auto'?'за датою':'вручну'}). Якщо плата ще не знає дату (немає інтернету після старту), вона бере зимовий профіль як найобережніший.</p>
 <h3>Генератор</h3>
 <ul><li>Схема: генератор → зарядник LiFePO4 (21 А) → батарея. Інвертор про генератор не знає, тому окремого сигналу «генератор працює» немає.</li>
+<li><b>Зворотний зв'язок</b> (${r.gen_fb_enabled?'<span class="on">увімкнено</span>':'вимкнено'}): допоміжний контакт контактора генератора між <b>D5 і G</b>; замкнутий = генератор справді працює. Тоді плата знає реальний стан генератора, а якщо реле замкнуте 3 хв, а контакт ні, — тривога «генератор не завівся». Підключати тільки сухий контакт, не 230 В.</li>
 <li><b>Поки працює генератор, важке навантаження вимкнене за будь-якого SOC</b>: зарядник дає ~1 кВт, і важке навантаження розряджало б батарею, яку він заряджає. «Працює» — це або плата замкнула його реле, або вночі в даних видно зарядник (BMS показує заряд на 300+ Вт більший, ніж інвертор, протягом 2 хв), навіть якщо генератор завели вручну. Удень так розпізнати не можна: контролери MakeSkyBlue теж заряджають батарею повз інвертор.</li>
 <li>Важке навантаження теж має режими: <b>Авто</b> (за порогами сезону), <b>Дозволити</b> (незалежно від порогів), <b>Заборонити</b> (вимкнено, напр. на час ремонту). Аварія за напругою і робота генератора вимикають його в будь-якому режимі. Після перезавантаження зберігається тільки «Заборонити».</li>
 <li>Режими генератора: <b>Авто</b> (за порогами сезону); <b>Запустити до мети</b> (працює, доки запас не дійде до «Генератор СТОП» поточного сезону, потім сам повертається в Авто); <b>Заборонити</b> (не запуститься, доки не повернеш Авто).</li>
@@ -311,13 +317,14 @@ async function loadNotify(){try{renderNotify(await (await api('/api/notify')).js
 async function post(p,body){const r=await fetch(p,{method:'POST',body:body||''});if(!r.ok)throw new Error(await r.text());}
 function renderNotify(j){
  const t=j.telegram,h=j.ha;let st='';
- if(!t.token_set){st='<p><span class="warn">Не налаштовано.</span> Два кроки нижче, і тривоги підуть у Telegram.</p>';}
+ if(t.unsupported){st='<p><span class="warn">Напряму з цієї плати — ні.</span> '+esc(t.unsupported)+'</p>';}
+ else if(!t.token_set){st='<p><span class="warn">Не налаштовано.</span> Два кроки нижче, і тривоги підуть у Telegram.</p>';}
  else if(!t.chat){st=`<p>Бот ${t.bot?'<b>@'+esc(t.bot)+'</b>':'(перевіряю токен…)'}, токен ${esc(t.token_hint)}. ${t.last_error?'<span class="bad">'+esc(t.last_error)+'</span>':''}</p>
   <p><b>Крок 3.</b> Відкрий ${t.bot?'<b>t.me/'+esc(t.bot)+'</b>':'свого бота'} і надішли <code>/start</code>. Для групи: додай бота в групу й напиши там будь-що. Чат з'явиться нижче за кілька секунд, натисни «Використати».</p>
   <div class="row"><button id="tgReset">Інший токен</button></div>`;}
  else{st=`<p><span class="on">✅ Працює</span>: бот <b>@${esc(t.bot||'?')}</b> → чат <code>${esc(t.chat)}</code>. ${t.last_ok_s>=0?'Останнє відправлення '+age(t.last_ok_s)+' тому.':'Ще нічого не відправлено.'} ${t.queue?'<span class="warn">У черзі: '+t.queue+'.</span>':''} ${t.last_error?'<span class="bad">'+esc(t.last_error)+'</span>':''}</p>
   <div class="row"><button id="tgTest">Надіслати тест</button><button id="tgReset">Від'єднати бота</button></div>`;}
- $('tgState').innerHTML=st;$('tgForm').hidden=t.token_set;
+ $('tgState').innerHTML=st;$('tgForm').hidden=t.token_set||!!t.unsupported;
  $('tgSeen').innerHTML=(t.token_set&&t.seen.length)?'<p style="margin-top:8px">Чати, що писали боту:</p>'+t.seen.map(c=>`<div class="row" style="margin:4px 0"><button data-chat="${esc(c.id)}">Використати</button><span><b>${esc(c.name.trim()||c.id)}</b> <span class="mute">${esc(c.id)} · «${esc(c.text)}» · ${ts(c.when)}</span></span></div>`).join(''):'';
  $('tgRecent').innerHTML=t.recent.length?'<p class="mute" style="margin:10px 0 4px">Останні повідомлення в Telegram:</p><div class="scroll"><table>'+t.recent.map(m=>`<tr><td class="mute" style="white-space:nowrap">${ts(m.when)}</td><td>${m.ok?'✅':'❌'}</td><td style="white-space:pre-wrap">${esc(m.text)}</td></tr>`).join('')+'</table></div>':'';
  if($('tgTest'))$('tgTest').onclick=()=>post('/api/telegram/test').then(loadNotify);
@@ -495,6 +502,10 @@ static void handleNotify() {
 
 static void handleTelegramToken() {
     if (!authed()) return;
+#if defined(ESP8266)
+    s_server->send(400, "text/plain", "На NodeMCU Telegram напряму неможливий (мало пам'яті для TLS). Тривоги йдуть через HA.");
+    return;
+#endif
     String t = s_server->arg("plain");
     t.trim();
     // Bot tokens look like 123456789:AA... — reject obvious paste mistakes.
@@ -534,6 +545,15 @@ static void handleHeavyMode() {
         return;
     }
     s_relays->setHeavyMode(m, "web");
+    s_server->send(200, "text/plain", "ok");
+}
+
+static void handleGenFeedback() {
+    if (!authed()) return;
+    String v = bodyWord("enabled");
+    v.trim();
+    if (v != "on" && v != "off") { s_server->send(400, "text/plain", "on|off"); return; }
+    s_relays->setGenFeedbackEnabled(v == "on");
     s_server->send(200, "text/plain", "ok");
 }
 
@@ -625,6 +645,7 @@ void begin(CompatWebServer& server, RelayController& relays, SystemFiller fillSy
     server.on("/api/settings", HTTP_POST, handlePostSettings);
     server.on("/api/gen_mode", HTTP_POST, handleGenMode);
     server.on("/api/heavy_mode", HTTP_POST, handleHeavyMode);
+    server.on("/api/gen_feedback", HTTP_POST, handleGenFeedback);
     server.on("/api/reset_state", HTTP_POST, handleResetState);
     server.on("/api/alerts/ack", HTTP_POST, handleAlertAck);
     server.on("/api/notify", HTTP_GET, handleNotify);

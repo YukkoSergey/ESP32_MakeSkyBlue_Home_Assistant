@@ -55,6 +55,12 @@
 // kChargerDetectMs (the inverter doesn't see the charger's current) — at night
 // only, since by day the MakeSkyBlue MPPTs do the same.
 //
+// Generator feedback (optional, enabled in the web UI): a dry auxiliary
+// contact of the generator's contactor between kGenFeedbackPin and GND,
+// closed = generator really running. With it, "generator running" is the
+// truth rather than a guess, and a relay closed for kGenNoStartMs without
+// the contact closing raises "generator did not start / stopped by itself".
+//
 // Voltage emergency: inverter battery voltage below kVoltEmergencyV for
 // kVoltEmergencyMs means the battery really is near empty whatever SOC says
 // (history: only at SOC 4 % and 11 %). Heavy load OFF and generator START in
@@ -97,6 +103,14 @@ public:
     // Night = sun below -6 deg (civil dusk) at the site.
     static constexpr float    kSiteLat = 50.45f, kSiteLon = 30.52f;   // Kyiv region
 
+#if defined(ESP8266)
+    static constexpr uint8_t  kGenFeedbackPin = 14;   // NodeMCU D5
+#else
+    static constexpr uint8_t  kGenFeedbackPin = 27;
+#endif
+    static constexpr uint32_t kGenFeedbackDebounceMs = 2000;
+    static constexpr uint32_t kGenNoStartMs = 3UL * 60UL * 1000UL;
+
     void begin(const Settings& s);
     // Returns true if the topic was consumed.
     bool handleMqttMessage(const String& topic, const String& payload);
@@ -122,7 +136,16 @@ public:
     bool voltEmergency() const  { return _voltEmergency; }
     // Charger (generator) seen in the data, whoever started it.
     bool chargerDetected() const { return _chargerDetected; }
-    bool generatorRunning() const { return _genOut || _chargerDetected; }
+    // With feedback: the contact (or our own start command, while it cranks).
+    // Without: our relay, or the charger seen in the data at night.
+    bool generatorRunning() const {
+        return _genFbEnabled ? (_genFbRunning || _genOut) : (_genOut || _chargerDetected);
+    }
+    bool genFeedbackEnabled() const { return _genFbEnabled; }
+    bool genFeedbackRunning() const { return _genFbRunning; }
+    // Relay closed for kGenNoStartMs but the contact never closed (or opened).
+    bool genNoStartAlarm() const { return _genNoStart; }
+    void setGenFeedbackEnabled(bool on);
     const String& frozenReason() const { return _frozenReason; }
     static bool isNightNow();
     int  soc() const            { return _soc; }
@@ -151,6 +174,7 @@ private:
     void checkFrozen();
     void onInverterBatteryVoltage(float v);
     void updateChargerDetect();
+    void updateGenFeedback();
     const SeasonProfile& profile() const { return _cfg.profiles[(int)activeSeason()]; }
 
     Settings    _cfg;
@@ -203,6 +227,14 @@ private:
     // Current / last generator session.
     uint32_t _genOnSinceMs  = 0;
     float    _sessionKwh    = 0;
+
+    // Generator feedback contact.
+    bool     _genFbEnabled = false;
+    bool     _genFbRunning = false;
+    bool     _genFbRaw = false;
+    uint32_t _genFbRawSinceMs = 0;
+    uint32_t _genNotRunningSinceMs = 0;
+    bool     _genNoStart = false;
 
     uint32_t _changes = 0;
 };

@@ -29,7 +29,7 @@
 // -----------------------------------------------------------------------------
 class Alerts {
 public:
-    enum Key : uint8_t { Stale = 0, Frozen, VoltEmergency, HaDown, BrokerDown, kCount };
+    enum Key : uint8_t { Stale = 0, Frozen, VoltEmergency, HaDown, BrokerDown, GenNoStart, kCount };
     static constexpr uint32_t kRepeatMs        = 10UL * 60UL * 1000UL;
     // No SOC right after boot is normal; don't call it stale this early.
     static constexpr uint32_t kBootGraceMs     = 5UL * 60UL * 1000UL;
@@ -71,7 +71,8 @@ private:
         String   detail;
         Alarm(const char* k) : key(k) {}
     };
-    Alarm _alarms[kCount] = {{"stale"}, {"frozen"}, {"voltage"}, {"ha_down"}, {"broker_down"}};
+    Alarm _alarms[kCount] = {{"stale"}, {"frozen"}, {"voltage"}, {"ha_down"}, {"broker_down"}, {"gen_no_start"}};
+    bool  _lastFbRunning = false;
     bool  _lastGen = false;
     bool  _genKnown = false;
     ResetKind _resetKind = ResetKind::Other;

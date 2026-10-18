@@ -71,8 +71,11 @@ void RelayController::begin(const Settings& s) {
 #endif
     }
 
+    pinMode(kGenFeedbackPin, INPUT_PULLUP);
+
     _cfg = s;
     _prefs.begin("relays", false);
+    _genFbEnabled = _prefs.getBool("gen_fb", false);
     // After a reboot the relays are decided from scratch: both start off and
     // the first fresh SOC decides (inside a hysteresis band = off). Only a
     // manual "forbid" survives — a reboot during maintenance must not switch
@@ -345,7 +348,46 @@ void RelayController::evaluate() {
 }
 
 void RelayController::tick() {
+    updateGenFeedback();
     applyOutputs();
+}
+
+void RelayController::setGenFeedbackEnabled(bool on) {
+    if (on == _genFbEnabled) return;
+    _genFbEnabled = on;
+    _prefs.putBool("gen_fb", on);
+    _genNoStart = false;
+    _genNotRunningSinceMs = 0;
+    Log.printf("[Relays] generator feedback contact %s\n", on ? "enabled" : "disabled");
+    _changes++;
+    applyOutputs();
+}
+
+void RelayController::updateGenFeedback() {
+    uint32_t now = millis();
+    bool raw = digitalRead(kGenFeedbackPin) == LOW;   // contact closed = running
+    if (raw != _genFbRaw) { _genFbRaw = raw; _genFbRawSinceMs = now; }
+    if (_genFbEnabled && raw != _genFbRunning && now - _genFbRawSinceMs >= kGenFeedbackDebounceMs) {
+        _genFbRunning = raw;
+        Log.printf("[Relays] generator feedback: %s%s\n", raw ? "RUNNING" : "stopped",
+                   raw && !_genOut ? " (not started by the board)" : "");
+        if (!raw) _genOffMs = now;   // settle time for the frozen-SOC rules
+        _changes++;
+    }
+    if (!_genFbEnabled) { _genFbRunning = false; _genNoStart = false; return; }
+
+    // Relay closed but the generator isn't (or is no longer) running.
+    if (_genOut && !_genFbRunning) {
+        if (!_genNotRunningSinceMs) _genNotRunningSinceMs = now;
+        if (!_genNoStart && now - _genNotRunningSinceMs >= kGenNoStartMs) {
+            _genNoStart = true;
+            Log.println("[Relays] generator commanded but NOT running (no feedback for 3 min)");
+            _changes++;
+        }
+    } else {
+        _genNotRunningSinceMs = 0;
+        if (_genNoStart) { _genNoStart = false; _changes++; }
+    }
 }
 
 void RelayController::applyOutputs() {
@@ -488,6 +530,9 @@ void RelayController::fillStatus(JsonObject o) const {
     o["pin_gen"] = "GPIO26";
 #endif
     o["charger_detected"] = _chargerDetected;
+    o["gen_fb_enabled"] = _genFbEnabled;
+    o["gen_fb_running"] = _genFbRunning;
+    o["gen_no_start"] = _genNoStart;
     o["charger_w"] = (int)(_batteryW - _invBatW);
     o["grid_v"] = r2(_gridV);
     o["load_w"] = (int)_loadW;
