@@ -74,4 +74,7 @@ const char* compatResetName(ResetKind k);   // English, for logs / JSON
 // Feed whatever watchdog the platform has (long uploads etc.).
 void compatFeedWatchdog();
 
+// HMAC-SHA256 as lowercase hex (signed commands from the VPS bridge).
+String compatHmacSha256Hex(const String& key, const String& msg);
+
 #endif

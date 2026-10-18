@@ -23,6 +23,7 @@
 #include "ha_relays.h"
 #include "alerts.h"
 #include "web_ui.h"
+#include "solar_assistant_mapping.h"
 
 static const char* kFirmwareBuild = __DATE__ " " __TIME__;
 static const char* kHostname = "dacha-relays";
@@ -64,11 +65,33 @@ static void onHaMessage(char* topic, byte* payload, unsigned int length) {
     haRelays.handleMessage(topic, payload, length);
 }
 
+// Solar Assistant lives on the LAN broker only; the VPS bridge needs these
+// six values for the Tuya virtual MUST device (and HA keeps their history).
+// Forwarded on change, and at least once a minute.
+static String   saLast[virtualMapSize];
+static uint32_t saSentMs[virtualMapSize];
+
+static void forwardSa(const String& topic, const String& value) {
+    for (int i = 0; i < virtualMapSize; i++) {
+        if (topic != virtualDeviceMap[i].mqttTopic) continue;
+        if (!mqttHa.connected()) return;
+        if (value == saLast[i] && millis() - saSentMs[i] < 60000) return;
+        String t = String("dacha_relays/sa/") + virtualDeviceMap[i].tuyaCode;
+        if (mqttHa.publish(t.c_str(), value.c_str(), false)) {
+            saLast[i] = value;
+            saSentMs[i] = millis();
+        }
+        return;
+    }
+}
+
 static void onLanMessage(char* topic, byte* payload, unsigned int length) {
     String message;
     message.reserve(length);
     for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
-    relays.handleMqttMessage(String(topic), message);
+    String t(topic);
+    relays.handleMqttMessage(t, message);
+    forwardSa(t, message);
 }
 
 // -----------------------------------------------------------------------------

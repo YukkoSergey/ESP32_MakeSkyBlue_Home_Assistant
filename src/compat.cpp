@@ -2,6 +2,17 @@
 
 #if defined(ESP32)
 #include <esp_task_wdt.h>
+#include <mbedtls/md.h>
+
+String compatHmacSha256Hex(const String& key, const String& msg) {
+    uint8_t mac[32];
+    mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                    (const uint8_t*)key.c_str(), key.length(),
+                    (const uint8_t*)msg.c_str(), msg.length(), mac);
+    char out[65];
+    for (int i = 0; i < 32; i++) sprintf(out + i * 2, "%02x", mac[i]);
+    return String(out);
+}
 
 ResetKind compatResetKind() {
     switch (esp_reset_reason()) {
@@ -21,6 +32,20 @@ void compatFeedWatchdog() { esp_task_wdt_reset(); }
 #elif defined(ESP8266)
 #include <LittleFS.h>
 #include <user_interface.h>
+#include <bearssl/bearssl_hmac.h>
+
+String compatHmacSha256Hex(const String& key, const String& msg) {
+    br_hmac_key_context kc;
+    br_hmac_key_init(&kc, &br_sha256_vtable, key.c_str(), key.length());
+    br_hmac_context hc;
+    br_hmac_init(&hc, &kc, 0);
+    br_hmac_update(&hc, msg.c_str(), msg.length());
+    uint8_t mac[32];
+    br_hmac_out(&hc, mac);
+    char out[65];
+    for (int i = 0; i < 32; i++) sprintf(out + i * 2, "%02x", mac[i]);
+    return String(out);
+}
 
 ResetKind compatResetKind() {
     switch (ESP.getResetInfoPtr()->reason) {

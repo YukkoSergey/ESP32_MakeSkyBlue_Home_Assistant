@@ -14,6 +14,11 @@ static const char* kAlertTopic       = "dacha_relays/alert";
 static const char* kAlertAckTopic    = "dacha_relays/alert/ack";
 static const char* kHeartbeatTopic   = "dacha_relays/ha_heartbeat";
 static const char* kHaStatusTopic    = "homeassistant/status";   // HA birth / LWT
+// Signed commands from the VPS bridge (dacha-bridge): {"c","a","t","s"} with
+// s = HMAC-SHA256(CMD_SECRET, "c|a|t"). Works without TLS: a sniffed broker
+// password isn't enough to forge or replay one.
+static const char* kSignedCmdTopic   = "dacha_relays/cmd";
+static constexpr long kCmdMaxSkewS   = 300;
 
 static constexpr uint32_t kPublishIntervalMs = 30000;
 static constexpr uint32_t kMinPublishGapMs   = 1000;
@@ -117,6 +122,9 @@ void HaRelays::onMqttConnected() {
     // Read-only health signals: safe without TLS.
     _mqtt->subscribe(kHeartbeatTopic);
     _mqtt->subscribe(kHaStatusTopic);
+#ifdef CMD_SECRET
+    _mqtt->subscribe(kSignedCmdTopic);
+#endif
     if (_commandsEnabled) {
         _mqtt->subscribe(kGenModeSetTopic);
         _mqtt->subscribe(kSeasonSetTopic);
@@ -141,6 +149,7 @@ void HaRelays::publishState() {
 
 bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned int length) {
     if (strcmp(topic, kHeartbeatTopic) == 0) { alerts.onHaHeartbeat(); return true; }
+    if (strcmp(topic, kSignedCmdTopic) == 0) { handleSignedCommand(payload, length); return true; }
     if (strcmp(topic, kHaStatusTopic) == 0) {
         alerts.onHaStatus(length >= 6 && memcmp(payload, "online", 6) == 0);
         return true;
@@ -187,6 +196,38 @@ bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned
     }
     publishState();
     return true;
+}
+
+void HaRelays::handleSignedCommand(const uint8_t* payload, unsigned int length) {
+#ifdef CMD_SECRET
+    DynamicJsonDocument d(512);
+    if (deserializeJson(d, payload, length)) return;
+    String c = d["c"] | "", a = d["a"] | "", s = d["s"] | "";
+    long t = d["t"] | 0L;
+    long now = (long)time(nullptr);
+    if (now < 1700000000 || labs(now - t) > kCmdMaxSkewS || t <= _lastCmdTs) {
+        Log.printf("[CMD] rejected '%s' (stale or replayed)\n", c.c_str());
+        return;
+    }
+    if (compatHmacSha256Hex(CMD_SECRET, c + "|" + a + "|" + String(t)) != s) {
+        Log.printf("[CMD] rejected '%s' (bad signature)\n", c.c_str());
+        return;
+    }
+    _lastCmdTs = t;
+    Log.printf("[CMD] signed command: %s %s\n", c.c_str(), a.c_str());
+    if (c == "ack") {
+        alerts.ack(a, "Telegram via VPS");
+    } else if (c == "heavy_mode") {
+        HeavyMode m;
+        if (RelayController::parseHeavyMode(a, m)) _relays.setHeavyMode(m, "VPS");
+    } else if (c == "gen_mode") {
+        GenMode m;
+        if (RelayController::parseGenMode(a, m)) _relays.setGenMode(m, "VPS");
+    }
+    publishState();
+#else
+    (void)payload; (void)length;
+#endif
 }
 
 void HaRelays::tick() {

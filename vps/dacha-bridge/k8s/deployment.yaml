@@ -1,0 +1,49 @@
+# dacha-bridge on the VPS k3s, next to Home Assistant and Mosquitto.
+#
+#   kubectl -n homeassistant create configmap dacha-bridge-code \
+#       --from-file=bridge.py --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n homeassistant create secret generic dacha-bridge-env --from-env-file=bridge.env
+#   kubectl apply -f deployment.yaml
+#
+# bridge.env (never committed): MQTT_USER, MQTT_PASS, TUYA_BASE, TUYA_ID,
+# TUYA_SECRET, TUYA_MPPT_IDS, TUYA_VIRTUAL_ID, MSB_SERIALS, TG_TOKEN, CMD_SECRET.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dacha-bridge
+  namespace: homeassistant
+  labels: {app: dacha-bridge}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}      # never two bridges publishing msbN/notify
+  selector:
+    matchLabels: {app: dacha-bridge}
+  template:
+    metadata:
+      labels: {app: dacha-bridge}
+    spec:
+      containers:
+        - name: bridge
+          image: python:3.12-slim
+          command:
+            - sh
+            - -c
+            - >-
+              pip install --no-cache-dir --disable-pip-version-check -q
+              paho-mqtt==2.1.0 requests==2.32.3 &&
+              exec python -u /app/bridge.py
+          envFrom:
+            - secretRef: {name: dacha-bridge-env}
+          env:
+            - {name: TZ, value: Europe/Kyiv}
+            - {name: MQTT_HOST, value: mosquitto.homeassistant.svc.cluster.local}
+            - {name: MQTT_PORT, value: "1883"}
+            - {name: HA_URL, value: "http://homeassistant.homeassistant.svc.cluster.local:8123"}
+          volumeMounts:
+            - {name: code, mountPath: /app}
+          resources:
+            requests: {cpu: 10m, memory: 48Mi}
+            limits: {memory: 160Mi}
+      volumes:
+        - name: code
+          configMap: {name: dacha-bridge-code}

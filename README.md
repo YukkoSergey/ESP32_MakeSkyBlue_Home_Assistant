@@ -132,6 +132,22 @@ ESP32 variant:
 Tuya HTTPS runs in its own FreeRTOS task: each call is a fresh TLS
 handshake, and in `loop()` that used to starve MQTT keepalives.
 
+## VPS bridge (vps/dacha-bridge)
+
+A small Python service in the VPS k3s (namespace `homeassistant`, next to HA
+and Mosquitto) — see `vps/dacha-bridge/bridge.py` and `k8s/deployment.yaml`:
+
+- MakeSkyBlue MPPT (Tuya Cloud) -> Solar_Manager `msbN/notify` (port of the
+  ESP32 bridge; the NodeMCU can't do Tuya HTTPS).
+- Solar Assistant values forwarded by the shed board (`dacha_relays/sa/*`)
+  -> Tuya virtual MUST device.
+- Telegram for board alerts (`dacha_relays/alert`), with "Прийняв" sent back
+  as a signed command; watchdogs for "board silent" and "HA down".
+- Signed commands `dacha_relays/cmd` = {c, a, t, s}, s = HMAC-SHA256(CMD_SECRET,
+  "c|a|t"), ±5 min, monotonic t.
+
+Secrets live in the k8s Secret `dacha-bridge-env` only.
+
 ## Alerts (Telegram)
 
 Sent straight from the board, no HA/VPS in the path. Alarms (no SA data,

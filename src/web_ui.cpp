@@ -298,6 +298,12 @@ function renderHow(){
 <li>Ті самі повідомлення йдуть і в Home Assistant (топік <code>dacha_relays/alert</code>), звідки автоматизація робить push на телефон. Два незалежні шляхи: якщо впаде один, лишиться другий.</li>
 <li><b>Сторож HA</b>: HA щохвилини шле платі пульс. Якщо пульсу немає 5 хв, HA повідомив offline або брокер HA недоступний 5 хв, плата пише про це в Telegram.</li>
 <li>Налаштування: картка «Сповіщення» вище. Зараз Telegram: ${lastStatus.alerts.telegram?'<span class="on">працює</span>':'<span class="warn">не налаштовано</span>'}.</li></ul>
+<h3>Сервіс на VPS (dacha-bridge)</h3>
+<ul><li>Працює в k3s поруч із HA (namespace <code>homeassistant</code>), окремо від нього.</li>
+<li><b>MakeSkyBlue → HA</b>: опитує три MPPT у Tuya Cloud і публікує кадри Solar_Manager (<code>msb1/2/3/notify</code>) — картка MPPT у HA.</li>
+<li><b>Solar Assistant → Tuya</b>: ця плата пересилає 6 значень SA у <code>dacha_relays/sa/*</code>, сервіс віддає їх віртуальному пристрою MUST (SmartLife).</li>
+<li><b>Telegram</b> (@dacha_yukko_bot): тривоги плати з кнопкою «Прийняв», /status. Пише сам, якщо <b>плата мовчить</b> 5 хв або <b>HA не відповідає</b>.</li>
+<li><b>Підписані команди</b>: «Прийняв» з Telegram приходить у <code>dacha_relays/cmd</code> з підписом HMAC-SHA256 (ключ CMD_SECRET у secrets.h і в k8s Secret). Підробити чи повторити таку команду без ключа неможливо, тому TLS для неї не потрібен.</li></ul>
 <h3>Що працює поза платою</h3>
 <ul><li><b>Річне реле часу</b> в щиті влітку вимикає мережу повністю: будинок працює від сонця і батарей.</li>
 <li><b>Реле напруги батареї</b> вмикає мережу в обхід реле часу, якщо в другій половині дня напруга низька (немає сонця, насувається шторм). Воно незалежне від плати й ніколи не підводило.</li>
