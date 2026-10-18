@@ -76,6 +76,13 @@ data we push, but doesn't refresh on its own between our writes.
 Replaces the ESP8266 NodeMCU that used to sit in the shed. Two active-LOW
 relay modules:
 
+NodeMCU (env:nodemcu, the board in the shed now): red "2 Relay Module
+high/low level trigger" (JQC-3F-05VDC), S1/S2 on **High**, active-HIGH:
+DC+ → **VU** (USB 5 V — VIN is input-only on this board, 0 V on USB power),
+DC− → G, IN1 → D1, IN2 → D2. Use a real 5 V supply: the old one gave ~8 V.
+
+ESP32 variant:
+
 | Relay | ESP32 pin | Old NodeMCU pin | Drives |
 |---|---|---|---|
 | Heavy load | GPIO25 | D1 (GPIO5) | 24 V PSU → signal line → contactor in the house (boiler, floor heating, AC / heat pump may run from the batteries) |

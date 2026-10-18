@@ -20,14 +20,25 @@ static const char* kInvBatITopic      = RELAY_TOPIC_PREFIX "solar_assistant/inve
 // Same freshness rule for the auxiliary readings as for SOC.
 static constexpr uint32_t kAuxStaleMs = RelayController::kSocStaleMs;
 
-// Active-LOW relay modules (LOW = relay ON).
-// ESP8266: plain push-pull, exactly like the sketch that ran in the shed for
-// years with this module (its pins are 5 V tolerant).
-// ESP32: open-drain. Its pins clamp to 3.3 V, and with the module's inputs on
-// 5 V both relays never released — open-drain alone didn't fix that either;
-// the module needs its inputs on 3.3 V (JD-VCC jumper off) for an ESP32.
+// Relay polarity is a build setting (RELAY_ACTIVE_HIGH), never a runtime
+// one: a wrong polarity closes the generator and heavy-load contacts exactly
+// when the board means to open them.
+//
+// * Active-HIGH (env:nodemcu): red "2 Relay Module high/low level trigger"
+//   with S1/S2 on High. LOW or a floating input = relay OFF, so boot, reset
+//   and a broken wire all release the relays; no 3.3 V vs 5 V issue.
+// * Active-LOW (env:esp32dev): the old blue JD-VCC module. On an ESP32 the
+//   pins are open-drain and the module needs its inputs on 3.3 V (JD-VCC
+//   jumper off) — with 5 V on its inputs the relays never released.
+#ifdef RELAY_ACTIVE_HIGH
+static constexpr bool kActiveHigh = true;
+#else
+static constexpr bool kActiveHigh = false;
+#endif
+static constexpr uint8_t kRelayOffLevel = kActiveHigh ? LOW : HIGH;
+
 static void writeRelay(uint8_t pin, bool on) {
-    digitalWrite(pin, on ? LOW : HIGH);
+    digitalWrite(pin, on == kActiveHigh ? HIGH : LOW);
 }
 
 // Strict number parse: "unavailable" and friends must not become 0.
@@ -49,14 +60,14 @@ static bool parseNumber(const String& payload, float& out) {
 }
 
 void RelayController::begin(const Settings& s) {
-    // Set the output latch HIGH (released) before enabling the driver, so the
-    // relay doesn't click on for a moment at boot.
+    // Set the output latch to "off" before enabling the driver, so the relay
+    // doesn't click on for a moment at boot.
     for (uint8_t pin : {kHeavyLoadPin, kGeneratorPin}) {
-        digitalWrite(pin, HIGH);
+        digitalWrite(pin, kRelayOffLevel);
 #if defined(ESP8266)
         pinMode(pin, OUTPUT);
 #else
-        pinMode(pin, OUTPUT_OPEN_DRAIN);
+        pinMode(pin, kActiveHigh ? OUTPUT : OUTPUT_OPEN_DRAIN);
 #endif
     }
 
@@ -425,6 +436,14 @@ void RelayController::fillStatus(JsonObject o) const {
     o["night"] = isNightNow();
     o["inv_battery_v"] = r2(_invBatV);
     o["volt_emergency"] = _voltEmergency;
+    o["relay_active_high"] = kActiveHigh;
+#if defined(ESP8266)
+    o["pin_heavy"] = "D1 (GPIO5)";
+    o["pin_gen"] = "D2 (GPIO4)";
+#else
+    o["pin_heavy"] = "GPIO25";
+    o["pin_gen"] = "GPIO26";
+#endif
     o["charger_detected"] = _chargerDetected;
     o["charger_w"] = (int)(_batteryW - _invBatW);
     o["grid_v"] = r2(_gridV);
