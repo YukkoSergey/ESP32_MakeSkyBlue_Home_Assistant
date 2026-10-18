@@ -74,6 +74,11 @@ const char* compatResetName(ResetKind k);   // English, for logs / JSON
 // Feed whatever watchdog the platform has (long uploads etc.).
 void compatFeedWatchdog();
 
+// Crash "black box" (ESP8266): the exception that reset the board, saved in
+// RTC memory by the core's crash hook. Empty string if the last reset wasn't
+// a crash (or on ESP32, where the core prints its own backtrace).
+String compatLastCrash();
+
 // HMAC-SHA256 as lowercase hex (signed commands from the VPS bridge).
 String compatHmacSha256Hex(const String& key, const String& msg);
 

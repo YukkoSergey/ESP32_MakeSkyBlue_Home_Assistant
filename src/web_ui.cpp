@@ -392,7 +392,11 @@ static void handleRoot() {
 
 static void handleStatus() {
     if (!authed()) return;
+#if defined(ESP8266)
+    DynamicJsonDocument doc(2560);   // ~15 KB free in total there
+#else
     DynamicJsonDocument doc(4096);
+#endif
     s_relays->fillStatus(doc.createNestedObject("relays"));
     s_fillSystem(doc.createNestedObject("system"));
     alerts.fillStatus(doc.createNestedObject("alerts"));
@@ -494,7 +498,11 @@ static void handleAlertAck() {
 
 static void handleNotify() {
     if (!authed()) return;
+#if defined(ESP8266)
+    DynamicJsonDocument doc(2048);
+#else
     DynamicJsonDocument doc(8192);
+#endif
     alerts.fillTelegram(doc.createNestedObject("telegram"));
     JsonObject ha = doc.createNestedObject("ha");
     alerts.fillHa(ha);

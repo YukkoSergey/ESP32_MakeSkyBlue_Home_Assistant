@@ -2,6 +2,8 @@
 
 #if defined(ESP32)
 #include <esp_task_wdt.h>
+
+String compatLastCrash() { return String(); }
 #include <mbedtls/md.h>
 
 String compatHmacSha256Hex(const String& key, const String& msg) {
@@ -33,6 +35,31 @@ void compatFeedWatchdog() { esp_task_wdt_reset(); }
 #include <LittleFS.h>
 #include <user_interface.h>
 #include <bearssl/bearssl_hmac.h>
+
+// --- crash black box -------------------------------------------------------
+// The ESP8266 core calls custom_crash_callback() on an exception, right before
+// the reset. RTC user memory survives the reset (not a power loss).
+struct CrashRecord {
+    uint32_t magic, reason, exccause, epc1, epc2, epc3, excvaddr, depc, uptimeS, freeHeap;
+};
+static constexpr uint32_t kCrashMagic = 0xDAC4A001;
+
+extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t, uint32_t) {
+    CrashRecord r{kCrashMagic, ri->reason, ri->exccause, ri->epc1, ri->epc2, ri->epc3,
+                  ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap()};
+    ESP.rtcUserMemoryWrite(0, (uint32_t*)&r, sizeof(r));
+}
+
+String compatLastCrash() {
+    CrashRecord r;
+    if (!ESP.rtcUserMemoryRead(0, (uint32_t*)&r, sizeof(r)) || r.magic != kCrashMagic) return String();
+    uint32_t zero = 0;
+    ESP.rtcUserMemoryWrite(0, &zero, sizeof(zero));   // report once
+    char buf[160];
+    snprintf(buf, sizeof(buf), "exccause=%u epc1=0x%08x epc2=0x%08x excvaddr=0x%08x depc=0x%08x "
+             "after %us, free heap %u", r.exccause, r.epc1, r.epc2, r.excvaddr, r.depc, r.uptimeS, r.freeHeap);
+    return String(buf);
+}
 
 String compatHmacSha256Hex(const String& key, const String& msg) {
     br_hmac_key_context kc;

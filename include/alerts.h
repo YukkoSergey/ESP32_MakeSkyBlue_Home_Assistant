@@ -37,6 +37,7 @@ public:
     static constexpr uint32_t kBrokerDownMs    = 5UL * 60UL * 1000UL;
 
     void begin(ResetKind resetKind);
+    void setCrashInfo(const String& s) { _crashInfo = s; }
     // ESP8266 has no tasks: call from loop(); does one Telegram step at most
     // once a second. No-op on ESP32 (a FreeRTOS task does it there).
     void service();
@@ -76,6 +77,7 @@ private:
     bool  _lastGen = false;
     bool  _genKnown = false;
     ResetKind _resetKind = ResetKind::Other;
+    String    _crashInfo;
     bool  _bootReported = false;
 
     uint32_t _lastHeartbeatMs = 0;      // 0 = never seen (automation not set up)

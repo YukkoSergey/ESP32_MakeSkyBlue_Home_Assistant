@@ -446,7 +446,8 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         bool crash = _resetKind == ResetKind::Crash || _resetKind == ResetKind::Watchdog ||
                      _resetKind == ResetKind::Brownout;
         send("boot", crash ? "warning" : "info",
-             String("плата запустилась, причина: ") + resetReasonUa(_resetKind), "", -1);
+             String("плата запустилась, причина: ") + resetReasonUa(_resetKind),
+             _crashInfo.length() ? "Дані збою: " + _crashInfo : String(), -1);
     }
 
     // Stale SA data.

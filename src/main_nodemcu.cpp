@@ -265,9 +265,13 @@ void setup() {
     Log.printf("\n[Boot] NodeMCU dacha relays, build %s, reset: %s\n",
                kFirmwareBuild, compatResetName(compatResetKind()));
 
+    String crash = compatLastCrash();
+    if (crash.length()) Log.printf("[Crash] previous reset: %s\n", crash.c_str());
+
     // Relays first: restore their state before anything slow happens.
     relays.begin(settings::load());
     alerts.begin(compatResetKind());
+    alerts.setCrashInfo(crash);
 
     haRelays.begin(&mqttHa, false);   // no TLS on this board: HA is read-only
     web_ui::begin(httpServer, relays, fillSystemStatus);
