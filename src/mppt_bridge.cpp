@@ -1,4 +1,5 @@
 #include "mppt_bridge.h"
+#include "app_log.h"
 
 // -----------------------------------------------------------------------------
 // Tuya returns each DP as a JSON number in its own device-native units, which
@@ -17,6 +18,7 @@
 // -----------------------------------------------------------------------------
 
 MpptBridge::MpptBridge(TuyaCloudClient& client) : _tuyaClient(client) {
+    _mutex = xSemaphoreCreateMutex();
     _devices[0] = {TUYA_MPPT_1_ID};
     _devices[1] = {TUYA_MPPT_2_ID};
     _devices[2] = {TUYA_MPPT_3_ID};
@@ -149,7 +151,7 @@ static uint16_t mapChargeMode(JsonArrayConst props) {
             return kChargeModeTable[i].smStatus;
         }
     }
-    Serial.printf("[MpptBridge] charge_mode unknown: '%s' — update kChargeModeTable\n", s);
+    Log.printf("[MpptBridge] charge_mode unknown: '%s' — update kChargeModeTable\n", s);
     return 0;
 }
 
@@ -164,14 +166,14 @@ bool MpptBridge::updateOne(int index) {
     DynamicJsonDocument doc(6144);
     DeserializationError err = deserializeJson(doc, props);
     if (err) {
-        Serial.printf("[MpptBridge] JSON parse failed for MPPT %d: %s\n", index, err.c_str());
+        Log.printf("[MpptBridge] JSON parse failed for MPPT %d: %s\n", index, err.c_str());
         return false;
     }
 
     // Legacy iot-03 status returns result directly as an array of {code,value}.
     JsonArrayConst arr = doc["result"].as<JsonArrayConst>();
     if (arr.isNull()) {
-        Serial.printf("[MpptBridge] MPPT %d: result is not an array (success=%d)\n",
+        Log.printf("[MpptBridge] MPPT %d: result is not an array (success=%d)\n",
                       index, (int)(doc["success"] | false));
         return false;
     }
@@ -251,35 +253,40 @@ bool MpptBridge::updateOne(int index) {
     next.calibVoltRaw        = 0;
 
     next.valid = true;
+    xSemaphoreTake(_mutex, portMAX_DELAY);
     _states[index] = next;
+    xSemaphoreGive(_mutex);
     return true;
 }
 
-void MpptBridge::updateAll() {
+int MpptBridge::updateAll() {
     // First kFakeSeedWindowMs after boot: serve the seed, don't touch Tuya.
     static bool announcedReal = false;
     if (millis() < kFakeSeedWindowMs) {
         static bool announcedFake = false;
         if (!announcedFake) {
-            Serial.printf("[MpptBridge] seeded values (fake) for first %u s\n",
+            Log.printf("[MpptBridge] seeded values (fake) for first %u s\n",
                           (unsigned)(kFakeSeedWindowMs / 1000));
             announcedFake = true;
         }
-        return;
+        return 0;
     }
     if (!announcedReal) {
-        Serial.println("[MpptBridge] seed window over, polling Tuya");
+        Log.println("[MpptBridge] seed window over, polling Tuya");
         announcedReal = true;
     }
+    int ok = 0;
     for (int i = 0; i < 3; i++) {
-        if (!updateOne(i)) {
-            Serial.printf("[MpptBridge] update MPPT %d failed (keeping last state)\n", i);
-        }
+        if (updateOne(i)) ok++;
+        else Log.printf("[MpptBridge] update MPPT %d failed (keeping last state)\n", i);
     }
+    return ok;
 }
 
-const MpptState& MpptBridge::getState(int index) const {
-    static const MpptState empty{};
-    if (index < 0 || index >= 3) return empty;
-    return _states[index];
+MpptState MpptBridge::getState(int index) const {
+    if (index < 0 || index >= 3) return MpptState{};
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    MpptState copy = _states[index];
+    xSemaphoreGive(_mutex);
+    return copy;
 }

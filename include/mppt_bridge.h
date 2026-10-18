@@ -5,6 +5,8 @@
 #include <ArduinoJson.h>
 #include "tuya_cloud_client.h"
 #include "secrets.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // -----------------------------------------------------------------------------
 // MpptState holds RAW Modbus register values, matching the units Solar_Manager
@@ -50,8 +52,11 @@ public:
     };
 
     MpptBridge(TuyaCloudClient& client);
-    void updateAll();
-    const MpptState& getState(int index) const;
+    // updateAll() runs in the Tuya task; getState() is called from the main
+    // loop, so it returns a copy taken under the lock.
+    // Returns how many devices were polled successfully.
+    int updateAll();
+    MpptState getState(int index) const;
 
     // Seed values disabled. Non-zero "live" data during first poll interval
     // is more confusing than helpful — 0 indicates "not yet received".
@@ -62,6 +67,7 @@ private:
     TuyaCloudClient& _tuyaClient;
     Device    _devices[3];
     MpptState _states[3];
+    SemaphoreHandle_t _mutex;
 
     // Daily generation tracking. Tuya electric_total is in 0.1 kWh; the
     // delta since midnight is stored directly as dailyGenRaw (SM 0x40001A

@@ -12,3 +12,6 @@ include/secrets.h
 scripts/.env
 scripts/.env.*
 
+
+# Flash dumps contain WiFi passwords
+backups/

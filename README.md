@@ -71,6 +71,82 @@ on flash, even at night when the real DPs would all be zero.
 The MUST device on Tuya is a virtual device — SmartLife app shows the
 data we push, but doesn't refresh on its own between our writes.
 
+**Flow C — battery reserve → relays (heavy load + generator)**
+
+Replaces the ESP8266 NodeMCU that used to sit in the shed. Two active-LOW
+relay modules:
+
+| Relay | ESP32 pin | Old NodeMCU pin | Drives |
+|---|---|---|---|
+| Heavy load | GPIO25 | D1 (GPIO5) | 24 V PSU → signal line → contactor in the house (boiler, floor heating, AC / heat pump may run from the batteries) |
+| Generator | GPIO26 | D2 (GPIO4) | 2-wire autostart, contact held closed = runs |
+
+- Input: `solar_assistant/total/battery_state_of_charge/state` on the LAN
+  broker. Reserve = SOC % × array capacity; all thresholds are kWh.
+- Three season profiles (summer / shoulder / winter) with their own
+  thresholds; picked by date (Kyiv time) or forced manually. No NTP yet →
+  winter, the strictest. Defaults come from Solar Assistant history — see
+  the comments in `src/settings.cpp`:
+
+  | Season | Heavy ON > | Heavy OFF < | Gen START < | Gen STOP > |
+  |---|---|---|---|---|
+  | Summer | 6.0 kWh | 4.0 | 1.5 (emergency) | 3.5 |
+  | Shoulder | 7.0 | 5.0 | 2.5 | 5.5 |
+  | Winter | 8.2 | 6.5 | 3.0 | 6.5 |
+- Generator modes: `auto` (by the profile), `run` (manual start, stops by
+  itself at the profile's STOP threshold), `off` (inhibited).
+- No fresh SOC for 3 min → heavy load OFF (economy). A running generator
+  keeps running; a stopped one isn't started blind.
+- **Frozen SOC.** SA sometimes keeps publishing a stuck SOC when its link to
+  the Pylontech BMS breaks — 7 times in the Nov 2024 – Oct 2026 history, from
+  an hour to 58 days. The inverter measures the battery on its own, so SOC
+  counts as frozen when, since its last change, (a) at night with no grid
+  voltage the house used ≥ 1 kWh (the MakeSkyBlue chargers are dark, so all
+  of it must come from the battery; works at 100 % too), or (b) below 98 % the
+  inverter-measured battery energy (V × I) reached 1.5 kWh. Both paused while
+  the generator runs + 30 min (its charger is invisible to the inverter).
+  On the history: all 7 cases caught, no false alarms. Frozen = same as
+  stale; remembered across reboots.
+- **Voltage emergency.** Inverter battery voltage < 47.0 V for 5 min → heavy
+  load OFF and generator START in any season (unless inhibited by hand),
+  whatever SOC says. History: only ever at SOC 4 % and 11 %; the inverter
+  itself shuts down at 45.0 V.
+- Relay state and generator mode survive reboots (NVS). Loop watchdog
+  60 s — a reboot releases both relays.
+- HA entities via MQTT discovery (`dacha_relays/state`). Commands from HA
+  (generator / season mode) are accepted only over TLS
+  (`MQTT_HA_CA_CERT` in `secrets.h`); without TLS they're read-only.
+- The generator charges the battery through its own LiFePO4 charger, so
+  the inverter knows nothing about it and there's no direct "generator
+  running" signal. Session energy and time-to-goal are estimates from SA
+  `battery_power` (net energy balance), informational only.
+
+Tuya HTTPS runs in its own FreeRTOS task: each call is a fresh TLS
+handshake, and in `loop()` that used to starve MQTT keepalives.
+
+## Alerts (Telegram)
+
+Sent straight from the board, no HA/VPS in the path. Alarms (no SA data,
+frozen SOC, voltage emergency) repeat every 10 min until acknowledged with
+the button under the message or on the web page; a "resolved" message
+follows when the condition clears. Generator start/stop and reboots (with
+the reason) are sent once. Offline → queued. `/status` in the chat replies
+with the current state. TLS is verified against Go Daddy Root G2.
+
+Setup: create a bot with @BotFather, put `TELEGRAM_BOT_TOKEN` into
+`secrets.h`, flash, send `/start` to the bot — the board logs the chat id —
+then add `TELEGRAM_CHAT_ID` and flash again. The board never talks to a chat
+other than `TELEGRAM_CHAT_ID`.
+
+## Web debug UI
+
+`http://dacha-esp32.local/` (or the board IP) on the LAN, HTTP Basic auth
+`WEB_USERNAME` / `WEB_PASSWORD` from `secrets.h`. Shows relay and system
+state, a live log (RAM ring buffer, 16 KB), season settings, generator
+buttons, reboot, relay state reset and a firmware upload form.
+Plain `GET /` without `Accept: text/html` still returns the old ESP8266
+JSON. API list: [include/web_ui.h](include/web_ui.h).
+
 ## Repository layout
 
 ```
@@ -84,6 +160,11 @@ include/
   solar_assistant_mapping.h Topic ↔ Tuya DP table.
   tuya_cloud_client.h Tuya Cloud OpenAPI client (HMAC signing, token).
   sm_config.h         SmSegment struct shared by SolarManagerDevice.
+  relay_controller.h  Heavy-load / generator relays, fail-safe rules.
+  settings.h          Season profiles + capacity, persisted in NVS.
+  ha_relays.h         HA MQTT discovery + commands for the relays.
+  web_ui.h            Web debug UI + JSON API.
+  app_log.h           Log sink: Serial + ring buffer for the web UI.
 
 src/
   main.cpp            Setup / loop, two MQTT clients, backoff, dispatch.
@@ -93,7 +174,8 @@ src/
   tuya_cloud_client.cpp Token cache, expiry tracking, /token +
                         /iot-03/devices/*/status + /datapoint/report.
 
-platformio.ini        board = esp32dev, loop stack bumped to 16 KB.
+platformio.ini        board = esp32dev, min_spiffs partitions (OTA),
+                      env:ota for uploads over WiFi.
 ```
 
 Two MQTT clients on the same ESP32:
@@ -182,6 +264,19 @@ cp include/secrets.h.example include/secrets.h
 pio run                     # compile
 pio run -t upload           # flash over USB
 pio device monitor -b 115200
+
+# over WiFi, no cable (password = OTA_PASSWORD in secrets.h)
+DACHA_OTA_PASSWORD=... pio run -e ota -t upload
+```
+
+Or upload `.pio/build/esp32dev/firmware.bin` from the web UI.
+
+Bench-testing the relays without touching the real SOC topic (the old
+ESP8266 listens to it):
+
+```
+PLATFORMIO_BUILD_FLAGS='-DRELAY_TOPIC_PREFIX=\"bench/\" -DRELAY_SOC_STALE_MS=30000 -DRELAY_VOLT_EMERGENCY_MS=20000' pio run -t upload
+mosquitto_pub -h <lan broker> -t bench/solar_assistant/total/battery_state_of_charge/state -m 29
 ```
 
 ### secrets.h template
@@ -197,9 +292,9 @@ Never commit real values — `secrets.h` is in `.gitignore`.
   They must match the Solar_Manager device serials configured in HA
   (Settings → Devices → Solar Manager). Rename either side and both
   will fall out of sync.
-- **Seed window** for boot-time fake data is 3 min
-  (`MpptBridge::kFakeSeedWindowMs`). Bump it if the card should stay
-  "alive" longer during dev.
+- **Seed window** for boot-time fake data is off
+  (`MpptBridge::kFakeSeedWindowMs = 0`). Set e.g. 180000 to get 3 min of
+  plausible values after boot during dev.
 - **`mapChargeMode`** in `mppt_bridge.cpp` currently returns 0 for any
   Tuya `charge_mode` value and logs the raw string. The Tuya mode
   vocabulary is `mode_1` … `mode_5`; Solar_Manager expects 0..6
@@ -215,6 +310,7 @@ Never commit real values — `secrets.h` is in `.gitignore`.
   fires cleanly on ungraceful disconnect (right now one client covers
   three serials).
 - TLS for the VPS broker (currently plaintext over the public internet).
+  Until then HA can't send relay commands.
 - Optional: MQTT Discovery topics for entities that live outside
   Solar_Manager (Solar Assistant mirror, uptime, etc.).
 
