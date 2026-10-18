@@ -73,19 +73,25 @@ void RelayController::begin(const Settings& s) {
 
     _cfg = s;
     _prefs.begin("relays", false);
-    _heavyLatched = _prefs.getBool("heavy", false);
-    _genLatched   = _prefs.getBool("gen", false);
+    // After a reboot the relays are decided from scratch: both start off and
+    // the first fresh SOC decides (inside a hysteresis band = off). Only a
+    // manual "forbid" survives — a reboot during maintenance must not switch
+    // the heavy load or the generator back on. "Allow" / "run to goal" fall
+    // back to auto.
+    _heavyLatched = false;
+    _genLatched   = false;
     uint8_t m     = _prefs.getUChar("gmode", (uint8_t)GenMode::Auto);
-    _genMode      = m <= (uint8_t)GenMode::Off ? (GenMode)m : GenMode::Auto;
+    _genMode      = m == (uint8_t)GenMode::Off ? GenMode::Off : GenMode::Auto;
     uint8_t hm    = _prefs.getUChar("hmode", (uint8_t)HeavyMode::Auto);
-    _heavyMode    = hm <= (uint8_t)HeavyMode::Off ? (HeavyMode)hm : HeavyMode::Auto;
-    if (_heavyMode != HeavyMode::Auto)
-        Log.printf("[Relays] heavy load mode restored: %s\n", heavyModeName(_heavyMode));
+    _heavyMode    = hm == (uint8_t)HeavyMode::Off ? HeavyMode::Off : HeavyMode::Auto;
+    if (_genMode != (GenMode)m || _heavyMode != (HeavyMode)hm) persist();
+    if (_heavyMode == HeavyMode::Off) Log.println("[Relays] heavy load stays forbidden (manual, kept across reboot)");
+    if (_genMode == GenMode::Off)     Log.println("[Relays] generator stays forbidden (manual, kept across reboot)");
     // A frozen BMS link usually survives our reboot; remember which SOC was
     // stuck so we don't need hours to detect it again.
     _frozenSoc    = _prefs.getInt("frozen_soc", -1);
-    Log.printf("[Relays] restored state: heavy=%d gen=%d genMode=%s frozenSoc=%d\n",
-               _heavyLatched, _genLatched, genModeName(_genMode), _frozenSoc);
+    Log.printf("[Relays] start from scratch: both off until fresh SOC (genMode=%s heavyMode=%s frozenSoc=%d)\n",
+               genModeName(_genMode), heavyModeName(_heavyMode), _frozenSoc);
 
     applyOutputs();
 }
@@ -392,8 +398,6 @@ void RelayController::applyOutputs() {
 }
 
 void RelayController::persist() {
-    _prefs.putBool("heavy", _heavyLatched);
-    _prefs.putBool("gen", _genLatched);
     _prefs.putUChar("gmode", (uint8_t)_genMode);
     _prefs.putUChar("hmode", (uint8_t)_heavyMode);
 }

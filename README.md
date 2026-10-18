@@ -118,8 +118,9 @@ ESP32 variant:
   load OFF and generator START in any season (unless inhibited by hand),
   whatever SOC says. History: only ever at SOC 4 % and 11 %; the inverter
   itself shuts down at 45.0 V.
-- Relay state and generator mode survive reboots (NVS). Loop watchdog
-  60 s — a reboot releases both relays.
+- After a reboot both relays are decided from scratch (off until fresh
+  SOC; inside a hysteresis band = off). Only a manual "forbid" survives.
+  Loop watchdog 60 s — a reboot releases both relays.
 - HA entities via MQTT discovery (`dacha_relays/state`). Commands from HA
   (generator / season mode) are accepted only over TLS
   (`MQTT_HA_CA_CERT` in `secrets.h`); without TLS they're read-only.

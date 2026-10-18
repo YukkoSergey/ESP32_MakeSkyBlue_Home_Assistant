@@ -29,9 +29,9 @@
 //     fuel, a stopped one isn't started blind.
 //   * Payloads outside 0..100 are ignored and never drive the relays.
 //   * Unknown date (no NTP yet) with season mode Auto -> winter profile.
-//   * Relay state and generator mode are persisted in NVS, so a reboot in the
-//     middle of a generator run doesn't abandon it. The generator is restored
-//     right at boot; the heavy load waits for the first fresh SOC.
+//   * After a reboot both relays start off and are decided from scratch by
+//     the first fresh SOC (inside a hysteresis band = off). Only a manual
+//     "forbid" (heavy load or generator) is kept across reboots.
 //
 // Frozen SOC: SA can keep publishing a stuck SOC when its link to the
 // Pylontech BMS breaks (seen 7 times in the 2024–2026 history, up to 58 days).
