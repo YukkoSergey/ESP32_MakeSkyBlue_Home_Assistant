@@ -263,6 +263,7 @@ class Telegram:
             log.info("telegram: no chat yet (send /start to the bot); dropped: %s", text[:80])
             return
         kw = {"chat_id": chat, "text": text}
+        log.info("telegram -> %r%s", text[:60], " [buttons]" if (ack_key or buttons) else "")
         if ack_key:
             kw["reply_markup"] = {"inline_keyboard": [[{"text": "✅ Прийняв", "callback_data": "ack:" + ack_key}]]}
         elif buttons:
@@ -275,6 +276,7 @@ class Telegram:
             {"command": "status", "description": "Поточний стан"},
             {"command": "gen", "description": "Генератор: запустити / заборонити / авто"},
             {"command": "heavy", "description": "Важке навантаження: авто / дозволити / заборонити"},
+            {"command": "help", "description": "Підказка по командах"},
         ])
 
     def poll_forever(self):
@@ -299,6 +301,7 @@ class Telegram:
             if chat != self.b.tg_chat:
                 self.call("answerCallbackQuery", callback_query_id=cq["id"])
                 return
+            log.info("telegram <- button %r", data)
             if data.startswith("ack:"):
                 key = data[4:]
                 self.b.acked.add(key)
@@ -322,9 +325,10 @@ class Telegram:
         text = (msg.get("text") or "").strip()
         if not chat:
             return
+        log.info("telegram <- chat %s: %r", chat, text[:60])
         if not self.b.tg_chat and text.startswith("/start"):
             self.b.set_tg_chat(chat)
-            self.send("✅ Дача: цей чат тепер отримує тривоги. /status — поточний стан.")
+            self.send("✅ Дача: цей чат тепер отримує тривоги.\n\n" + HELP_TEXT)
             return
         if chat != self.b.tg_chat:
             log.info("telegram: ignoring chat %s", chat)
@@ -337,10 +341,10 @@ class Telegram:
             self.send(self.b.heavy_text(), buttons=[
                 [("🔄 Авто", "do:heavy_mode:auto"), ("⛔ Заборонити", "do:heavy_mode:off")],
                 [("⚡ Дозволити (обхід порогів)", "ask:heavy_mode:on")]])
-        elif text.startswith("/status") or text.startswith("/start"):
+        elif text.startswith("/status"):
             self.send(self.b.status_text())
-        else:
-            self.send("Команди: /status, /gen, /heavy")
+        else:   # /help, /start and anything unknown
+            self.send(HELP_TEXT)
 
 
 CONFIRM_TEXT = {
@@ -348,6 +352,16 @@ CONFIRM_TEXT = {
     ("heavy_mode", "on"): "Дозволити важке навантаження незалежно від порогів? "
                           "Аварія за напругою і робота генератора все одно його вимкнуть.",
 }
+HELP_TEXT = (
+    "🏡 Дача — бот керування\n\n"
+    "/status — стан: заряд, запас, важке навантаження, генератор, мережа\n"
+    "/gen — генератор: ▶️ запустити до мети / ⏹ заборонити / 🔄 авто\n"
+    "/heavy — важке навантаження: 🔄 авто / ⛔ заборонити / ⚡ дозволити\n"
+    "/help — ця підказка\n\n"
+    "Тривоги приходять самі, з кнопкою «✅ Прийняв» — після неї нагадування припиняються.\n"
+    "Запуск генератора і «дозволити» перепитують підтвердження. Команди йдуть на плату з підписом; "
+    "бот слухає тільки цей чат."
+)
 MODE_UA = {"auto": "авто", "run": "запуск до мети", "off": "заборонено", "on": "дозволено вручну"}
 
 
@@ -389,6 +403,8 @@ class Bridge:
         t = msg.topic
         try:
             if t == "dacha_relays/state":
+                if not self.board_state:
+                    log.info("first board state received")
                 self.board_state = json.loads(msg.payload)
                 self.board_last = time.time()
             elif t == "dacha_relays/alert":
@@ -561,6 +577,7 @@ class Bridge:
                     continue
                 if self.tuya.report(TUYA_VIRTUAL_ID, dp, tuya_value(v)):
                     self.sa_sent[code] = v
+                    log.info("tuya virtual MUST: %s=%s", code, v)
 
     def loop_watch(self):
         ha_fails = 0
