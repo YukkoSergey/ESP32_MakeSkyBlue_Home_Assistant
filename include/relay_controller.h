@@ -61,6 +61,10 @@
 // any season unless it is inhibited by hand.
 // -----------------------------------------------------------------------------
 enum class GenMode : uint8_t { Auto = 0, Run = 1, Off = 2 };
+// Heavy load: Auto = by the season profile; On = allowed regardless of the
+// thresholds; Off = forbidden. Voltage emergency and a running generator cut
+// it in every mode — those protect the battery, they aren't preferences.
+enum class HeavyMode : uint8_t { Auto = 0, On = 1, Off = 2 };
 
 class RelayController {
 public:
@@ -101,6 +105,10 @@ public:
     void applySettings(const Settings& s);
     const Settings& currentSettings() const { return _cfg; }
     void setGenMode(GenMode m, const char* source);
+    void setHeavyMode(HeavyMode m, const char* source);
+    HeavyMode heavyMode() const { return _heavyMode; }
+    static const char* heavyModeName(HeavyMode m);
+    static bool parseHeavyMode(const String& s, HeavyMode& out);
     // Forget latched relay state and generator mode (back to Auto, both off).
     void resetState();
 
@@ -186,6 +194,7 @@ private:
     bool     _heavyLatched = false;
     bool     _genLatched   = false;
     GenMode  _genMode      = GenMode::Auto;
+    HeavyMode _heavyMode   = HeavyMode::Auto;
 
     // What's actually on the pins.
     bool     _heavyOut = false;

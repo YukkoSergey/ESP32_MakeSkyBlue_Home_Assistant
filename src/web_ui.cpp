@@ -44,7 +44,10 @@ pre{margin:0;height:340px;overflow:auto;background:var(--bg);border:1px solid va
 <div id="alarms"></div>
 <div class="card why" style="margin-bottom:12px"><h2>Чому зараз так</h2><div id="why">завантаження…</div></div>
 <div class="grid">
- <div class="card"><h2>Батарея і реле</h2><div class="kv" id="st"></div></div>
+ <div class="card"><h2>Батарея і реле</h2><div class="kv" id="st"></div>
+  <div class="row" style="margin-top:10px"><span class="mute">Важке навантаження:</span>
+   <button data-h="auto">Авто</button><button data-h="on">Дозволити</button><button data-h="off">Заборонити</button>
+  </div><div class="mute" style="margin-top:6px">«Дозволити» обходить пороги, але аварія за напругою і робота генератора все одно вимикають важке навантаження.</div></div>
  <div class="card"><h2>Генератор</h2><div class="kv" id="gen"></div>
   <div class="row" style="margin-top:10px">
    <button data-m="auto">Авто</button><button data-m="run">Запустити до мети</button><button data-m="off">Заборонити</button>
@@ -157,7 +160,7 @@ async function status(){
    ['SOC',r.soc<0?'—':r.soc+' %'],['Запас',r.reserve_kwh<0?'—':r.reserve_kwh+' / '+r.capacity_kwh+' кВт·год'],
    ['Дані SA',r.soc_fresh?`<span class="on">свіжі</span> (${age(r.soc_age_s)})`:`<span class="bad">немає (${age(r.soc_age_s)}) — економ</span>`],
    ['Сезон',SEASONS[r.season]+(r.season_mode=='auto'?' (авто)':' (вручну)')],
-   ['Важке навантаження',onoff(r.heavy_load,'ДОЗВОЛЕНО','економ')],
+   ['Важке навантаження',onoff(r.heavy_load,'ДОЗВОЛЕНО','економ')+(r.heavy_mode=='auto'?' (авто)':r.heavy_mode=='on'?' <span class="warn">(дозволено вручну)</span>':' <span class="warn">(заборонено вручну)</span>')],
    ['Пороги важкого',`ВВІМК &gt; ${t.heavy_on_kwh} · ВИМК &lt; ${t.heavy_off_kwh}`],
    ['Батарея (BMS)',r.battery_w+' Вт'],['Напруга батареї (інвертор)',r.inv_battery_v<0?'—':r.inv_battery_v+' В'+(r.volt_emergency?' <span class="bad">АВАРІЯ</span>':'')],
    ['Мережа',r.grid_v<0?'—':(r.grid_v>=100?'є, '+r.grid_v+' В':'немає')],
@@ -169,6 +172,7 @@ async function status(){
    ['Працює',r.generator?r.gen_on_min+' хв':'—'],['Зарядив за сесію',r.gen_session_kwh+' кВт·год'],
    ['До мети',r.gen_eta_h<0?'—':'~'+r.gen_eta_h+' год']]);
   document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('sel',b.dataset.m==r.gen_mode));
+  document.querySelectorAll('[data-h]').forEach(b=>b.classList.toggle('sel',b.dataset.h==r.heavy_mode));
   lastStatus=j;renderAlarms(j.alerts);renderWhy(r);renderHow();
   kv($('sys'),[
    ['Аптайм',up(s.uptime_s)],['Час',s.local_time||'не синхронізовано'],['WiFi',`${s.wifi_ssid} (${s.wifi_rssi} dBm), ${s.ip}`],
@@ -204,12 +208,15 @@ function renderWhy(r){
  const t=r.thresholds,res=r.reserve_kwh,cap=r.capacity_kwh,sea=SEASONS[r.season];
  const lines=[];
  if(r.volt_emergency)lines.push(`<b class="bad">Аварія за напругою</b>: батарея ${r.inv_battery_v} В, нижче 47 В понад 5 хв. Вона майже порожня, хоч би що показував SOC. Важке навантаження вимкнено, генератор запущено (якщо не заборонений).`);
+ if(r.heavy_mode=='off')lines.push(`<b class="warn">Важке навантаження заборонене вручну.</b> Пороги не діють, доки не натиснеш «Авто».`);
+ if(r.heavy_mode=='on')lines.push(`<b class="warn">Важке навантаження дозволене вручну</b>, незалежно від порогів`+(r.heavy_load?'.':', але зараз його вимкнув захист (аварія за напругою або працює генератор).'));
  if(r.charger_detected&&!r.generator)lines.push(`<b class="warn">Працює зарядник генератора</b>, хоча плата його не запускала (BMS бачить на ~${r.charger_w} Вт більше заряду, ніж інвертор). Генератор завели вручну або його власний контролер.`);
  if((r.generator||r.charger_detected)&&r.soc_fresh&&!r.soc_frozen&&!r.volt_emergency)lines.push(`<b>Важке навантаження вимкнене, поки працює генератор</b>, за будь-якого SOC: зарядник дає ~1 кВт і не потягне важке навантаження.`);
  if(r.soc_frozen){
   lines.push(`<b class="bad">SOC застиг на ${r.soc} %</b> (${r.frozen_reason}). Плата йому не довіряє, тому важке навантаження <b>заборонене</b>, а генератор лишається як був. Повернеться до норми, щойно SOC почне змінюватись.`);
  }else if(!r.soc_fresh){
   lines.push(`<b class="bad">Немає свіжих даних від Solar Assistant</b> (${age(r.soc_age_s)}). Тому важке навантаження <b>заборонене</b> (економ-режим), доки дані не повернуться.`);
+ }else if(r.heavy_mode!='auto'){
  }else if(r.heavy_load){
   lines.push(`<b class="on">Важке навантаження дозволене</b>: запас ${kwh(res)} (${r.soc} %). Вимкнеться, коли запас впаде нижче ${kwh(t.heavy_off_kwh)} (поріг сезону «${sea}»).`);
  }else if(res>t.heavy_on_kwh){
@@ -259,7 +266,8 @@ function renderHow(){
 <h3>Генератор</h3>
 <ul><li>Схема: генератор → зарядник LiFePO4 (21 А) → батарея. Інвертор про генератор не знає, тому окремого сигналу «генератор працює» немає.</li>
 <li><b>Поки працює генератор, важке навантаження вимкнене за будь-якого SOC</b>: зарядник дає ~1 кВт, і важке навантаження розряджало б батарею, яку він заряджає. «Працює» — це або плата замкнула його реле, або вночі в даних видно зарядник (BMS показує заряд на 300+ Вт більший, ніж інвертор, протягом 2 хв), навіть якщо генератор завели вручну. Удень так розпізнати не можна: контролери MakeSkyBlue теж заряджають батарею повз інвертор.</li>
-<li>Режими: <b>Авто</b> (за порогами сезону); <b>Запустити до мети</b> (працює, доки запас не дійде до «Генератор СТОП» поточного сезону, потім сам повертається в Авто); <b>Заборонити</b> (не запуститься, доки не повернеш Авто).</li>
+<li>Важке навантаження теж має режими: <b>Авто</b> (за порогами сезону), <b>Дозволити</b> (незалежно від порогів), <b>Заборонити</b> (вимкнено, напр. на час ремонту). Аварія за напругою і робота генератора вимикають його в будь-якому режимі. Режим зберігається після перезавантаження.</li>
+<li>Режими генератора: <b>Авто</b> (за порогами сезону); <b>Запустити до мети</b> (працює, доки запас не дійде до «Генератор СТОП» поточного сезону, потім сам повертається в Авто); <b>Заборонити</b> (не запуститься, доки не повернеш Авто).</li>
 <li>За годину роботи генератор у середньому додає ~0.7 кВт·год (за історією). «Зарядив за сесію» і «До мети» — приблизні оцінки з балансу енергії батареї.</li></ul>
 <h3>Безпека: що буває, коли щось ламається</h3>
 <ul><li><b>Немає даних від Solar Assistant 3 хв</b> (впав SA, брокер або WiFi): важке навантаження вимикається (економ). Генератор, що працює, працює далі, доки є паливо. Генератор, що стоїть, наосліп не запускається.</li>
@@ -327,6 +335,9 @@ $('save').onclick=async()=>{
  try{await api('/api/settings',{method:'POST',body:JSON.stringify(body)});$('msg').innerHTML='<span class="on">збережено</span>';await loadSettings();status()}
  catch(e){$('msg').innerHTML='<span class="bad">'+e.message+'</span>'}
 };
+document.querySelectorAll('[data-h]').forEach(b=>b.onclick=async()=>{
+ if(b.dataset.h=='on'&&!confirm('Дозволити важке навантаження незалежно від порогів?'))return;
+ try{await api('/api/heavy_mode',{method:'POST',body:b.dataset.h});status()}catch(e){alert(e.message)}});
 document.querySelectorAll('[data-m]').forEach(b=>b.onclick=async()=>{
  if(b.dataset.m!='auto'&&!confirm(b.textContent+'?'))return;
  try{await api('/api/gen_mode',{method:'POST',body:b.dataset.m});status()}catch(e){alert(e.message)}});
@@ -513,6 +524,19 @@ static void handleTelegramTest() {
     s_server->send(200, "text/plain", "ok");
 }
 
+static void handleHeavyMode() {
+    if (!authed()) return;
+    HeavyMode m;
+    String v = bodyWord("mode");
+    v.trim();
+    if (!RelayController::parseHeavyMode(v, m)) {
+        s_server->send(400, "text/plain", "mode must be auto|on|off");
+        return;
+    }
+    s_relays->setHeavyMode(m, "web");
+    s_server->send(200, "text/plain", "ok");
+}
+
 static void handleResetState() {
     if (!authed()) return;
     s_relays->resetState();
@@ -600,6 +624,7 @@ void begin(CompatWebServer& server, RelayController& relays, SystemFiller fillSy
     server.on("/api/settings", HTTP_GET, handleGetSettings);
     server.on("/api/settings", HTTP_POST, handlePostSettings);
     server.on("/api/gen_mode", HTTP_POST, handleGenMode);
+    server.on("/api/heavy_mode", HTTP_POST, handleHeavyMode);
     server.on("/api/reset_state", HTTP_POST, handleResetState);
     server.on("/api/alerts/ack", HTTP_POST, handleAlertAck);
     server.on("/api/notify", HTTP_GET, handleNotify);

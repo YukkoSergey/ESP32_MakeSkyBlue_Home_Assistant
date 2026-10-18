@@ -77,6 +77,10 @@ void RelayController::begin(const Settings& s) {
     _genLatched   = _prefs.getBool("gen", false);
     uint8_t m     = _prefs.getUChar("gmode", (uint8_t)GenMode::Auto);
     _genMode      = m <= (uint8_t)GenMode::Off ? (GenMode)m : GenMode::Auto;
+    uint8_t hm    = _prefs.getUChar("hmode", (uint8_t)HeavyMode::Auto);
+    _heavyMode    = hm <= (uint8_t)HeavyMode::Off ? (HeavyMode)hm : HeavyMode::Auto;
+    if (_heavyMode != HeavyMode::Auto)
+        Log.printf("[Relays] heavy load mode restored: %s\n", heavyModeName(_heavyMode));
     // A frozen BMS link usually survives our reboot; remember which SOC was
     // stuck so we don't need hours to detect it again.
     _frozenSoc    = _prefs.getInt("frozen_soc", -1);
@@ -348,13 +352,21 @@ void RelayController::applyOutputs() {
         _changes++;
     }
 
-    // No heavy load while the generator runs: its ~1 kW charger can't feed it.
-    bool heavy = _heavyLatched && fresh && !_frozen && !_voltEmergency && !generatorRunning();
+    // No heavy load while the generator runs (its ~1 kW charger can't feed
+    // it) or in a voltage emergency — in every mode, manual ones included.
+    bool blocked = _voltEmergency || generatorRunning();
+    bool heavy;
+    switch (_heavyMode) {
+        case HeavyMode::On:  heavy = !blocked; break;
+        case HeavyMode::Off: heavy = false; break;
+        default:             heavy = _heavyLatched && fresh && !_frozen && !blocked; break;
+    }
     bool gen   = _genMode == GenMode::Run || (_genMode == GenMode::Auto && _genLatched);
 
     if (heavy != _heavyOut) {
-        Log.printf("[Relays] heavy load -> %s (soc=%d, reserve=%.1f kWh, %s)\n",
-                   heavy ? "ON" : "OFF", _soc, reserveKwh(), settings::seasonName(activeSeason()));
+        Log.printf("[Relays] heavy load -> %s (soc=%d, reserve=%.1f kWh, mode=%s, %s)\n",
+                   heavy ? "ON" : "OFF", _soc, reserveKwh(), heavyModeName(_heavyMode),
+                   settings::seasonName(activeSeason()));
         _heavyOut = heavy;
         _changes++;
     }
@@ -383,6 +395,33 @@ void RelayController::persist() {
     _prefs.putBool("heavy", _heavyLatched);
     _prefs.putBool("gen", _genLatched);
     _prefs.putUChar("gmode", (uint8_t)_genMode);
+    _prefs.putUChar("hmode", (uint8_t)_heavyMode);
+}
+
+void RelayController::setHeavyMode(HeavyMode m, const char* source) {
+    if (m == _heavyMode) return;
+    Log.printf("[Relays] heavy load mode %s -> %s (by %s)\n",
+               heavyModeName(_heavyMode), heavyModeName(m), source);
+    _heavyMode = m;
+    persist();
+    _changes++;
+    applyOutputs();
+}
+
+const char* RelayController::heavyModeName(HeavyMode m) {
+    switch (m) {
+        case HeavyMode::Auto: return "auto";
+        case HeavyMode::On:   return "on";
+        case HeavyMode::Off:  return "off";
+    }
+    return "?";
+}
+
+bool RelayController::parseHeavyMode(const String& s, HeavyMode& out) {
+    if (s == "auto") { out = HeavyMode::Auto; return true; }
+    if (s == "on")   { out = HeavyMode::On;   return true; }
+    if (s == "off")  { out = HeavyMode::Off;  return true; }
+    return false;
 }
 
 void RelayController::applySettings(const Settings& s) {
@@ -455,6 +494,7 @@ void RelayController::fillStatus(JsonObject o) const {
     o["heavy_load"] = _heavyOut;
     o["generator"] = _genOut;
     o["gen_mode"] = genModeName(_genMode);
+    o["heavy_mode"] = heavyModeName(_heavyMode);
     o["battery_w"] = _haveBatteryW ? (int)_batteryW : 0;
     o["gen_on_min"] = _genOut ? (millis() - _genOnSinceMs) / 60000 : 0;
     o["gen_session_kwh"] = r2(_sessionKwh);

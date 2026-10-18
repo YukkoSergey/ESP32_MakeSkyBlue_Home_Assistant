@@ -8,6 +8,7 @@ static const char* kBase             = "dacha_relays";
 static const char* kStateTopic       = "dacha_relays/state";
 static const char* kGenModeSetTopic  = "dacha_relays/gen_mode/set";
 static const char* kSeasonSetTopic   = "dacha_relays/season_mode/set";
+static const char* kHeavyModeSetTopic = "dacha_relays/heavy_mode/set";
 static const char* kDiscoveryPrefix  = "homeassistant";
 static const char* kAlertTopic       = "dacha_relays/alert";
 static const char* kAlertAckTopic    = "dacha_relays/alert/ack";
@@ -88,6 +89,9 @@ void HaRelays::publishDiscovery() {
     if (_commandsEnabled) {
         clearEntity(_mqtt, "sensor", "gen_mode");
         clearEntity(_mqtt, "sensor", "season_mode");
+        clearEntity(_mqtt, "sensor", "heavy_mode");
+        publishEntity("select", "heavy_mode", "Heavy load mode", "{{ value_json.heavy_mode }}",
+                      (String("\"cmd_t\":\"") + kHeavyModeSetTopic + "\",\"options\":[\"auto\",\"on\",\"off\"]").c_str());
         publishEntity("select", "gen_mode", "Generator mode", "{{ value_json.gen_mode }}",
                       (String("\"cmd_t\":\"") + kGenModeSetTopic + "\",\"options\":[\"auto\",\"run\",\"off\"]").c_str());
         publishEntity("select", "season_mode", "Season mode", "{{ value_json.season_mode }}",
@@ -96,6 +100,8 @@ void HaRelays::publishDiscovery() {
     } else {
         clearEntity(_mqtt, "select", "gen_mode");
         clearEntity(_mqtt, "select", "season_mode");
+        clearEntity(_mqtt, "select", "heavy_mode");
+        publishEntity("sensor", "heavy_mode", "Heavy load mode", "{{ value_json.heavy_mode }}", e.c_str());
         publishEntity("sensor", "gen_mode", "Generator mode", "{{ value_json.gen_mode }}", e.c_str());
         publishEntity("sensor", "season_mode", "Season mode", "{{ value_json.season_mode }}", e.c_str());
     }
@@ -110,6 +116,7 @@ void HaRelays::onMqttConnected() {
     if (_commandsEnabled) {
         _mqtt->subscribe(kGenModeSetTopic);
         _mqtt->subscribe(kSeasonSetTopic);
+        _mqtt->subscribe(kHeavyModeSetTopic);
         _mqtt->subscribe(kAlertAckTopic);
     }
     Log.printf("[HA relays] discovery published, commands %s\n",
@@ -146,14 +153,18 @@ bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned
     }
     bool gen = strcmp(topic, kGenModeSetTopic) == 0;
     bool season = strcmp(topic, kSeasonSetTopic) == 0;
-    if (!gen && !season) return false;
+    bool heavy = strcmp(topic, kHeavyModeSetTopic) == 0;
+    if (!gen && !season && !heavy) return false;
     if (!_commandsEnabled) return true;   // never act without TLS
 
     String v;
     for (unsigned i = 0; i < length; i++) v += (char)payload[i];
     v.trim();
 
-    if (gen) {
+    if (heavy) {
+        HeavyMode m;
+        if (RelayController::parseHeavyMode(v, m)) _relays.setHeavyMode(m, "HA");
+    } else if (gen) {
         GenMode m;
         if (RelayController::parseGenMode(v, m)) _relays.setGenMode(m, "HA");
         else Log.printf("[HA relays] bad generator mode '%s'\n", v.c_str());
