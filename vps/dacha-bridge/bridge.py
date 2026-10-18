@@ -257,7 +257,7 @@ class Telegram:
             log.warning("telegram %s: %s", method, e)
             return None
 
-    def send(self, text: str, ack_key: str | None = None):
+    def send(self, text: str, ack_key: str | None = None, buttons: list | None = None):
         chat = self.b.tg_chat
         if not chat:
             log.info("telegram: no chat yet (send /start to the bot); dropped: %s", text[:80])
@@ -265,7 +265,17 @@ class Telegram:
         kw = {"chat_id": chat, "text": text}
         if ack_key:
             kw["reply_markup"] = {"inline_keyboard": [[{"text": "✅ Прийняв", "callback_data": "ack:" + ack_key}]]}
+        elif buttons:
+            kw["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row]
+                                                      for row in buttons]}
         self.call("sendMessage", **kw)
+
+    def setup_menu(self):
+        self.call("setMyCommands", commands=[
+            {"command": "status", "description": "Поточний стан"},
+            {"command": "gen", "description": "Генератор: запустити / заборонити / авто"},
+            {"command": "heavy", "description": "Важке навантаження: авто / дозволити / заборонити"},
+        ])
 
     def poll_forever(self):
         while True:
@@ -286,12 +296,24 @@ class Telegram:
             cq = u["callback_query"]
             chat = str(cq["message"]["chat"]["id"])
             data = cq.get("data", "")
-            if chat == self.b.tg_chat and data.startswith("ack:"):
+            if chat != self.b.tg_chat:
+                self.call("answerCallbackQuery", callback_query_id=cq["id"])
+                return
+            if data.startswith("ack:"):
                 key = data[4:]
                 self.b.acked.add(key)
                 self.b.send_board_cmd("ack", key)
                 self.call("answerCallbackQuery", callback_query_id=cq["id"], text="Прийнято, нагадувань більше не буде")
                 log.info("alarm %s acknowledged in Telegram", key)
+            elif data.startswith("ask:"):        # risky command: confirm first
+                _, cmd, arg = data.split(":", 2)
+                self.call("answerCallbackQuery", callback_query_id=cq["id"])
+                self.send(CONFIRM_TEXT.get((cmd, arg), "Підтвердити?"),
+                          buttons=[[("✅ Так", f"do:{cmd}:{arg}"), ("✖️ Ні", "noop")]])
+            elif data.startswith("do:"):
+                _, cmd, arg = data.split(":", 2)
+                self.call("answerCallbackQuery", callback_query_id=cq["id"], text="Надсилаю на плату…")
+                threading.Thread(target=self.b.run_board_command, args=(cmd, arg), daemon=True).start()
             else:
                 self.call("answerCallbackQuery", callback_query_id=cq["id"])
             return
@@ -307,8 +329,26 @@ class Telegram:
         if chat != self.b.tg_chat:
             log.info("telegram: ignoring chat %s", chat)
             return
-        if text.startswith("/status") or text.startswith("/start"):
+        if text.startswith("/gen"):
+            self.send(self.b.gen_text(), buttons=[
+                [("▶️ Запустити до мети", "ask:gen_mode:run")],
+                [("⏹ Заборонити", "do:gen_mode:off"), ("🔄 Авто", "do:gen_mode:auto")]])
+        elif text.startswith("/heavy"):
+            self.send(self.b.heavy_text(), buttons=[
+                [("🔄 Авто", "do:heavy_mode:auto"), ("⛔ Заборонити", "do:heavy_mode:off")],
+                [("⚡ Дозволити (обхід порогів)", "ask:heavy_mode:on")]])
+        elif text.startswith("/status") or text.startswith("/start"):
             self.send(self.b.status_text())
+        else:
+            self.send("Команди: /status, /gen, /heavy")
+
+
+CONFIRM_TEXT = {
+    ("gen_mode", "run"): "Запустити генератор? Він працюватиме, доки запас не дійде до мети поточного сезону.",
+    ("heavy_mode", "on"): "Дозволити важке навантаження незалежно від порогів? "
+                          "Аварія за напругою і робота генератора все одно його вимкнуть.",
+}
+MODE_UA = {"auto": "авто", "run": "запуск до мети", "off": "заборонено", "on": "дозволено вручну"}
 
 
 # =============================================================================
@@ -395,6 +435,57 @@ class Bridge:
         ts = int(time.time())
         sig = hmac.new(CMD_SECRET.encode(), f"{cmd}|{arg}|{ts}".encode(), hashlib.sha256).hexdigest()
         self.mq.publish("dacha_relays/cmd", json.dumps({"c": cmd, "a": arg, "t": ts, "s": sig}))
+
+    def run_board_command(self, cmd: str, arg: str):
+        """Send a signed command and report what the board did (from its state)."""
+        s = self.board_state
+        if not s or time.time() - self.board_last > BOARD_SILENT_S:
+            self.tg.send("⚠️ Плата зараз не на зв'язку — команду не надіслано.")
+            return
+        if cmd == "gen_mode" and arg == "run":
+            goal = (s.get("thresholds") or {}).get("gen_stop_kwh")
+            if goal is not None and (s.get("reserve_kwh") or 0) >= goal:
+                self.tg.send(f"ℹ️ Запас {s.get('reserve_kwh')} кВт·год уже не нижчий за мету {goal} кВт·год — "
+                             "плата одразу поверне «авто», генератор не запуститься.")
+                return
+        before = time.time()
+        self.send_board_cmd(cmd, arg)
+        log.info("board command %s=%s from Telegram", cmd, arg)
+        key = cmd
+        for _ in range(20):                      # the board republishes its state right away
+            time.sleep(1)
+            if self.board_last > before and self.board_state.get(key) == arg:
+                break
+        s = self.board_state
+        if self.board_last <= before or s.get(key) != arg:
+            self.tg.send(f"⚠️ Плата не підтвердила команду ({cmd} = {arg}). Перевір /status.")
+            return
+        self.tg.send(self.gen_text() if cmd == "gen_mode" else self.heavy_text())
+
+    def gen_text(self) -> str:
+        s = self.board_state
+        if not s:
+            return "Від плати ще немає даних."
+        th = s.get("thresholds") or {}
+        fb = ""
+        if s.get("gen_fb_enabled"):
+            fb = " Генератор (контакт): " + ("ПРАЦЮЄ" if s.get("gen_fb_running") else "стоїть") + "."
+            if s.get("gen_no_start"):
+                fb += " ⚠️ Не завівся!"
+        return (f"⚙️ Генератор: режим {MODE_UA.get(s.get('gen_mode'), s.get('gen_mode'))}, реле "
+                f"{'ЗАМКНУТЕ' if s.get('generator') else 'розімкнуте'}.{fb}\n"
+                f"Запас {s.get('reserve_kwh')} кВт·год; авто-старт < {th.get('gen_start_kwh')}, "
+                f"мета / стоп > {th.get('gen_stop_kwh')}.")
+
+    def heavy_text(self) -> str:
+        s = self.board_state
+        if not s:
+            return "Від плати ще немає даних."
+        th = s.get("thresholds") or {}
+        return (f"🔌 Важке навантаження: {'ДОЗВОЛЕНЕ' if s.get('heavy_load') else 'економ'} "
+                f"(режим {MODE_UA.get(s.get('heavy_mode'), s.get('heavy_mode'))}).\n"
+                f"Запас {s.get('reserve_kwh')} кВт·год; вмикається > {th.get('heavy_on_kwh')}, "
+                f"вимикається < {th.get('heavy_off_kwh')}.")
 
     # --- alerts from the board ---------------------------------------------
     def on_alert(self, a: dict):
@@ -501,6 +592,7 @@ class Bridge:
         for target in (self.loop_mppt, self.loop_publish, self.loop_sa, self.loop_watch):
             threading.Thread(target=target, daemon=True).start()
         if TG_TOKEN:
+            self.tg.setup_menu()
             self.tg.poll_forever()
         else:
             while True:
