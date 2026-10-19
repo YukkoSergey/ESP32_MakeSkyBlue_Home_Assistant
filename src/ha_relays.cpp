@@ -21,10 +21,10 @@ static const char* kHaStatusTopic    = "homeassistant/status";   // HA birth / L
 static const char* kSignedCmdTopic   = "dacha_relays/cmd";
 static constexpr long kCmdMaxSkewS   = 300;
 
-static constexpr uint32_t kPublishIntervalMs = 30000;
-static constexpr uint32_t kMinPublishGapMs   = 1000;
+static constexpr uint32_t kPublishIntervalMs = 60000;
+static constexpr uint32_t kMinPublishGapMs   = 5000;
 // HA marks sensors unavailable if the board goes quiet for this long.
-static constexpr int      kExpireAfterS      = 120;
+static constexpr int      kExpireAfterS      = 300;   // state every 60 s, so 5 missed = gone
 
 static const char* kDeviceJson =
     "\"dev\":{\"ids\":[\"esp32_dacha_relays\"],\"name\":\"Dacha relays\","

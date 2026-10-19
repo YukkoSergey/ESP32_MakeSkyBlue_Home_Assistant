@@ -46,6 +46,10 @@ static void freshClient(WiFiClient*& c, PubSubClient& mqtt) {
         delete c;
     }
     c = new WiFiClient();
+    // Short write timeout: on a slow internet link a publish waiting 5 s for
+    // TCP acks (the default) stalled the whole loop — the web page went dark
+    // for minutes before each crash.
+    c->setTimeout(1500);
     mqtt.setClient(*c);
 }
 
@@ -91,7 +95,12 @@ static void forwardSa(const char* topic, const char* value) {
     for (int i = 0; i < virtualMapSize; i++) {
         if (strcmp(topic, virtualDeviceMap[i].mqttTopic) != 0) continue;
         if (!mqttHa.connected()) return;
-        if (strcmp(value, saLast[i]) == 0 && millis() - saSentMs[i] < 60000) return;
+        // Changed values at most every 15 s, unchanged ones every 2 min: the
+        // Tuya virtual device and HA history don't need more, and the
+        // internet link to the HA broker is the board's weakest spot.
+        uint32_t age = millis() - saSentMs[i];
+        bool changed = strcmp(value, saLast[i]) != 0;
+        if (saSentMs[i] && (changed ? age < 15000 : age < 120000)) return;
         char t[48];
         snprintf(t, sizeof(t), "dacha_relays/sa/%s", virtualDeviceMap[i].tuyaCode);
         if (mqttHa.publish(t, value, false)) {
@@ -231,7 +240,7 @@ static bool kickLanMqtt() {
     freshClient(lanTcp, mqttLan);
     mqttLan.setServer(MQTT_LAN_HOST, MQTT_LAN_PORT);
     mqttLan.setCallback(onLanMessage);
-    mqttLan.setSocketTimeout(5);
+    mqttLan.setSocketTimeout(2);
     mqttLan.setKeepAlive(60);   // weak WiFi in the shed: don't drop on a few lost packets
     if (!mqttLan.connect("nodemcu-relays-lan", MQTT_LAN_USERNAME, MQTT_LAN_PASSWORD)) {
         Log.printf("[MQTT LAN] connect failed rc=%d\n", mqttLan.state());
@@ -254,7 +263,7 @@ static bool kickHaMqtt() {
     mqttHa.setServer(MQTT_HA_HOST, MQTT_HA_PORT);
     mqttHa.setCallback(onHaMessage);
     mqttHa.setBufferSize(1536);   // discovery ~400 B, relay state ~1 KB
-    mqttHa.setSocketTimeout(5);
+    mqttHa.setSocketTimeout(2);
     mqttHa.setKeepAlive(60);
     if (!mqttHa.connect("nodemcu-relays-ha", MQTT_HA_USERNAME, MQTT_HA_PASSWORD)) {
         Log.printf("[MQTT HA] connect failed rc=%d\n", mqttHa.state());
