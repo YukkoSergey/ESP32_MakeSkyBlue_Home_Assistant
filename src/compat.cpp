@@ -51,10 +51,17 @@ struct CrashRecord {
     uint32_t magic, reason, exccause, epc1, epc2, epc3, excvaddr, depc, uptimeS, freeHeap;
     uint32_t crumb, wifiDrops;
     uint32_t trace[kCrashTrace];
-    uint32_t guardZone;        // 0 = no guard hit
-    uint8_t  guard[48];        // what overwrote the canary
 };
-static constexpr uint32_t kCrashMagic = 0xDAC4A004;
+static constexpr uint32_t kCrashMagic = 0xDAC4A005;
+
+// Guard hits live in their own RTC slot (words 64..), so a crash that follows
+// the hit (e.g. heap check firing during shutdown) can't overwrite them.
+struct GuardRecord {
+    uint32_t magic, zone, uptimeS, freeHeap, crumb, wifiDrops;
+    uint8_t  bytes[48];
+};
+static constexpr uint32_t kGuardMagic = 0xDAC46A01;
+static constexpr uint32_t kGuardSlot  = 64;
 
 static bool isCodeAddr(uint32_t a) {
     return (a >= 0x40200000 && a < 0x40300000) || (a >= 0x40100000 && a < 0x40108000);
@@ -63,7 +70,7 @@ static bool isCodeAddr(uint32_t a) {
 extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t stack, uint32_t stack_end) {
     CrashRecord r{kCrashMagic, ri->reason, ri->exccause, ri->epc1, ri->epc2, ri->epc3,
                   ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap(),
-                  g_crumb, g_wifiDrops, {}, 0, {}};
+                  g_crumb, g_wifiDrops, {}};
     int n = 0;
     for (uint32_t p = stack; p + 4 <= stack_end && n < kCrashTrace; p += 4) {
         uint32_t v = *(uint32_t*)p;
@@ -73,19 +80,37 @@ extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t stack, uint3
 }
 
 void compatGuardTripped(uint32_t zone, const uint8_t* bytes, size_t n) {
-    CrashRecord r{};
-    r.magic = kCrashMagic;
-    r.uptimeS = millis() / 1000;
-    r.freeHeap = ESP.getFreeHeap();
-    r.crumb = g_crumb;
-    r.wifiDrops = g_wifiDrops;
-    r.guardZone = zone;
-    memcpy(r.guard, bytes, n < sizeof(r.guard) ? n : sizeof(r.guard));
-    ESP.rtcUserMemoryWrite(0, (uint32_t*)&r, sizeof(r));
-    ESP.restart();
+    GuardRecord g{kGuardMagic, zone, (uint32_t)(millis() / 1000), ESP.getFreeHeap(), g_crumb, g_wifiDrops, {}};
+    memcpy(g.bytes, bytes, n < sizeof(g.bytes) ? n : sizeof(g.bytes));
+    ESP.rtcUserMemoryWrite(kGuardSlot, (uint32_t*)&g, sizeof(g));
+    // Hard reset: ESP.restart() tears WiFi down and frees memory, and the
+    // heap check then panicked on the very corruption we just caught.
+    ESP.reset();
+}
+
+static String lastGuardHit() {
+    GuardRecord g;
+    if (!ESP.rtcUserMemoryRead(kGuardSlot, (uint32_t*)&g, sizeof(g)) || g.magic != kGuardMagic) return String();
+    uint32_t zero = 0;
+    ESP.rtcUserMemoryWrite(kGuardSlot, &zero, sizeof(zero));
+    const char* who = g.zone / 10 == 1 ? "LAN MQTT client" : g.zone / 10 == 2 ? "HA MQTT client" : "?";
+    const char* where = g.zone % 10 == 1 ? "zone before" : g.zone % 10 == 2 ? "zone after" : "object itself";
+    char buf[16];
+    String s = String("GUARD HIT: ") + who + ", " + where + ", after " + String(g.uptimeS) + "s, loop phase " +
+               String(g.crumb) + ", heap " + String(g.freeHeap) + "; bytes:";
+    for (uint8_t b : g.bytes) { snprintf(buf, sizeof(buf), " %02x", b); s += buf; }
+    s += " | ascii: ";
+    for (uint8_t b : g.bytes) s += (b >= 32 && b < 127) ? (char)b : '.';
+    return s;
 }
 
 String compatLastCrash() {
+    String guard = lastGuardHit();
+    if (guard.length()) {
+        uint32_t zero = 0;
+        ESP.rtcUserMemoryWrite(0, &zero, sizeof(zero));   // any crash after it is a consequence
+        return guard;
+    }
     CrashRecord r;
     if (!ESP.rtcUserMemoryRead(0, (uint32_t*)&r, sizeof(r)) || r.magic != kCrashMagic) return String();
     uint32_t zero = 0;
@@ -93,17 +118,6 @@ String compatLastCrash() {
     char buf[160];
     snprintf(buf, sizeof(buf), "exccause=%u epc1=0x%08x epc2=0x%08x excvaddr=0x%08x depc=0x%08x "
              "after %us, free heap %u", r.exccause, r.epc1, r.epc2, r.excvaddr, r.depc, r.uptimeS, r.freeHeap);
-    if (r.guardZone) {
-        String g = "GUARD ZONE " + String(r.guardZone) + " overwritten after " + String(r.uptimeS) +
-                   "s (loop phase " + String(r.crumb) + "), bytes:";
-        for (int i = 0; i < (int)sizeof(r.guard); i++) {
-            snprintf(buf, sizeof(buf), " %02x", r.guard[i]);
-            g += buf;
-        }
-        g += " | ascii: ";
-        for (int i = 0; i < (int)sizeof(r.guard); i++) g += (r.guard[i] >= 32 && r.guard[i] < 127) ? (char)r.guard[i] : '.';
-        return g;
-    }
     String s(buf);
     snprintf(buf, sizeof(buf), "; loop phase %u, wifi drops %u", r.crumb, r.wifiDrops);
     s += buf;
