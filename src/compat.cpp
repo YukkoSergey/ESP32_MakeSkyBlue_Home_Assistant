@@ -1,5 +1,8 @@
 #include "compat.h"
 
+volatile uint8_t  g_crumb = 0;
+volatile uint16_t g_wifiDrops = 0;
+
 #if defined(ESP32)
 #include <esp_task_wdt.h>
 
@@ -45,9 +48,10 @@ void compatFeedWatchdog() { esp_task_wdt_reset(); }
 static constexpr int kCrashTrace = 16;
 struct CrashRecord {
     uint32_t magic, reason, exccause, epc1, epc2, epc3, excvaddr, depc, uptimeS, freeHeap;
+    uint32_t crumb, wifiDrops;
     uint32_t trace[kCrashTrace];
 };
-static constexpr uint32_t kCrashMagic = 0xDAC4A002;
+static constexpr uint32_t kCrashMagic = 0xDAC4A003;
 
 static bool isCodeAddr(uint32_t a) {
     return (a >= 0x40200000 && a < 0x40300000) || (a >= 0x40100000 && a < 0x40108000);
@@ -55,7 +59,8 @@ static bool isCodeAddr(uint32_t a) {
 
 extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t stack, uint32_t stack_end) {
     CrashRecord r{kCrashMagic, ri->reason, ri->exccause, ri->epc1, ri->epc2, ri->epc3,
-                  ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap(), {}};
+                  ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap(),
+                  g_crumb, g_wifiDrops, {}};
     int n = 0;
     for (uint32_t p = stack; p + 4 <= stack_end && n < kCrashTrace; p += 4) {
         uint32_t v = *(uint32_t*)p;
@@ -73,6 +78,8 @@ String compatLastCrash() {
     snprintf(buf, sizeof(buf), "exccause=%u epc1=0x%08x epc2=0x%08x excvaddr=0x%08x depc=0x%08x "
              "after %us, free heap %u", r.exccause, r.epc1, r.epc2, r.excvaddr, r.depc, r.uptimeS, r.freeHeap);
     String s(buf);
+    snprintf(buf, sizeof(buf), "; loop phase %u, wifi drops %u", r.crumb, r.wifiDrops);
+    s += buf;
     s += "; trace:";
     for (int i = 0; i < kCrashTrace && r.trace[i]; i++) {
         snprintf(buf, sizeof(buf), " %08x", r.trace[i]);

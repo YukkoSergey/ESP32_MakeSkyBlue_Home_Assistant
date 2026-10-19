@@ -143,6 +143,17 @@ static int scanForBestNetwork() {
     return best;
 }
 
+// Drop both MQTT clients and their TCP connections. Called the moment WiFi is
+// lost, before any WiFi re-init: a ClientContext left over from the dead link
+// ended up with a dangling lwIP pcb, and the next connected()/loop() on it
+// crashed (ClientContext::state, exccause 9, garbage address).
+static void stopNetClients() {
+    mqttLan.disconnect();
+    mqttHa.disconnect();
+    lanTcp.stop();
+    haTcp.stop();
+}
+
 static void kickWifi() {
     uint32_t now = millis();
     if (WiFi.status() == WL_CONNECTED) {
@@ -156,14 +167,21 @@ static void kickWifi() {
     }
     if (wifiWasConnected) {
         wifiWasConnected = false;
-        Log.println("[WiFi] connection lost");
+        g_wifiDrops++;
+        stopNetClients();
+        Log.println("[WiFi] connection lost, MQTT clients closed");
     }
     if (now < wifiReconnect.nextAttemptMs) return;
 
-    WiFi.mode(WIFI_STA);
-    WiFi.hostname(kHostname);
-    WiFi.setSleepMode(WIFI_NONE_SLEEP);   // mains-powered; sleep hurts a weak link
-    WiFi.disconnect();
+    static bool wifiInit = false;
+    if (!wifiInit) {   // once: these re-init the interface
+        WiFi.persistent(false);
+        WiFi.mode(WIFI_STA);
+        WiFi.hostname(kHostname);
+        WiFi.setSleepMode(WIFI_NONE_SLEEP);   // mains-powered; sleep hurts a weak link
+        wifiInit = true;
+    }
+    WiFi.disconnect(false);
     int best = scanForBestNetwork();
     if (best >= 0) wifiNetworkIdx = best;
     else if (wifiReconnect.nextAttemptMs != 0) wifiNetworkIdx = (wifiNetworkIdx + 1) % kWifiNetworkCount;
@@ -295,30 +313,31 @@ void setup() {
 }
 
 void loop() {
-    kickWifi();
-    kickTime();
+    g_crumb = 1; kickWifi();
+    g_crumb = 2; kickTime();
 
-    bool lanOk = kickLanMqtt();
-    bool haOk  = kickHaMqtt();
-    if (lanOk) mqttLan.loop();
-    if (haOk)  mqttHa.loop();
+    bool wifiUp = WiFi.status() == WL_CONNECTED;
+    g_crumb = 3; bool lanOk = wifiUp && kickLanMqtt();
+    g_crumb = 4; bool haOk  = wifiUp && kickHaMqtt();
+    g_crumb = 5; if (lanOk) mqttLan.loop();
+    g_crumb = 6; if (haOk)  mqttHa.loop();
 
-    relays.tick();
-    alerts.tick(relays, mqttHa.connected());
-    alerts.service();
+    g_crumb = 7; relays.tick();
+    g_crumb = 8; alerts.tick(relays, haOk && mqttHa.connected());
 
     static bool netServicesStarted = false;
-    if (WiFi.status() == WL_CONNECTED) {
+    if (wifiUp) {
         if (!netServicesStarted) {
             httpServer.begin();
             beginArduinoOta();
             netServicesStarted = true;
         }
-        httpServer.handleClient();
-        ArduinoOTA.handle();
+        g_crumb = 9;  httpServer.handleClient();
+        g_crumb = 10; ArduinoOTA.handle();
     }
 
-    if (haOk) haRelays.tick();
+    g_crumb = 11; if (haOk) haRelays.tick();
+    g_crumb = 0;
     delay(2);
 }
 

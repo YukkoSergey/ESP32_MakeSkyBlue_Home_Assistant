@@ -79,6 +79,11 @@ void compatFeedWatchdog();
 // a crash (or on ESP32, where the core prints its own backtrace).
 String compatLastCrash();
 
+// Breadcrumbs for the black box: which part of loop() was running, and how
+// many times WiFi dropped since boot. Cheap global writes.
+extern volatile uint8_t  g_crumb;
+extern volatile uint16_t g_wifiDrops;
+
 // HMAC-SHA256 as lowercase hex (signed commands from the VPS bridge).
 String compatHmacSha256Hex(const String& key, const String& msg);
 
