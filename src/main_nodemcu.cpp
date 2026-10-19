@@ -182,6 +182,7 @@ static bool kickLanMqtt() {
     mqttLan.setServer(MQTT_LAN_HOST, MQTT_LAN_PORT);
     mqttLan.setCallback(onLanMessage);
     mqttLan.setSocketTimeout(5);
+    mqttLan.setKeepAlive(60);   // weak WiFi in the shed: don't drop on a few lost packets
     if (!mqttLan.connect("nodemcu-relays-lan", MQTT_LAN_USERNAME, MQTT_LAN_PASSWORD)) {
         Log.printf("[MQTT LAN] connect failed rc=%d\n", mqttLan.state());
         bumpBackoff(lanReconnect);
@@ -207,6 +208,7 @@ static bool kickHaMqtt() {
     mqttHa.setCallback(onHaMessage);
     mqttHa.setBufferSize(1536);   // discovery ~400 B, relay state ~1 KB
     mqttHa.setSocketTimeout(5);
+    mqttHa.setKeepAlive(60);
     if (!mqttHa.connect("nodemcu-relays-ha", MQTT_HA_USERNAME, MQTT_HA_PASSWORD)) {
         Log.printf("[MQTT HA] connect failed rc=%d\n", mqttHa.state());
         bumpBackoff(haReconnect);

@@ -119,7 +119,13 @@ void HaRelays::publishDiscovery() {
 
 void HaRelays::onMqttConnected() {
     if (!_mqtt) return;
-    publishDiscovery();
+    // Discovery configs are retained by the broker: once per boot is enough.
+    // Re-sending ~18 of them on every reconnect (and on a weak WiFi link that
+    // is often) only churns the small ESP8266 heap.
+    if (!_discoveryDone) {
+        publishDiscovery();
+        _discoveryDone = true;
+    }
     // Read-only health signals: safe without TLS.
     _mqtt->subscribe(kHeartbeatTopic);
     _mqtt->subscribe(kHaStatusTopic);

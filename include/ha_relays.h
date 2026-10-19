@@ -36,6 +36,7 @@ private:
     uint32_t         _lastPublishMs = 0;
     uint32_t         _lastChange = 0;
     long             _lastCmdTs = 0;
+    bool             _discoveryDone = false;
     void handleSignedCommand(const uint8_t* payload, unsigned int length);
 };
 
