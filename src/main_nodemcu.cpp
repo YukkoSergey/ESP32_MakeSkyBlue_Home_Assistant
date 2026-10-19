@@ -29,10 +29,25 @@ static const char* kFirmwareBuild = __DATE__ " " __TIME__;
 static const char* kHostname = "dacha-relays";
 static const char* kTimeZone = "EET-2EEST,M3.5.0/3,M10.5.0/4";   // Kyiv
 
-static WiFiClient   lanTcp;
-static PubSubClient mqttLan(lanTcp);
-static WiFiClient   haTcp;
-static PubSubClient mqttHa(haTcp);
+// A fresh WiFiClient for every connection attempt (see freshClient()).
+static WiFiClient*  lanTcp = nullptr;
+static PubSubClient mqttLan;
+static WiFiClient*  haTcp = nullptr;
+static PubSubClient mqttHa;
+
+// Never reuse a WiFiClient after its connection died. On ESP8266 a
+// ClientContext left from a broken link (seen on the internet link to the HA
+// broker, WiFi itself fine) keeps a dangling lwIP pcb, and the next
+// PubSubClient::connected() crashed in ClientContext::state(). Throwing the
+// object away and making a new one leaves nothing dangling to touch.
+static void freshClient(WiFiClient*& c, PubSubClient& mqtt) {
+    if (c) {
+        c->stop();
+        delete c;
+    }
+    c = new WiFiClient();
+    mqtt.setClient(*c);
+}
 
 static RelayController  relays;
 static HaRelays         haRelays(relays);
@@ -150,8 +165,8 @@ static int scanForBestNetwork() {
 static void stopNetClients() {
     mqttLan.disconnect();
     mqttHa.disconnect();
-    lanTcp.stop();
-    haTcp.stop();
+    if (lanTcp) lanTcp->stop();
+    if (haTcp) haTcp->stop();
 }
 
 static void kickWifi() {
@@ -213,6 +228,7 @@ static bool kickLanMqtt() {
     if (millis() < lanReconnect.nextAttemptMs) return false;
     Log.printf("[MQTT LAN] connecting %s:%d (backoff=%u)\n", MQTT_LAN_HOST, MQTT_LAN_PORT,
                (unsigned)lanReconnect.backoffMs);
+    freshClient(lanTcp, mqttLan);
     mqttLan.setServer(MQTT_LAN_HOST, MQTT_LAN_PORT);
     mqttLan.setCallback(onLanMessage);
     mqttLan.setSocketTimeout(5);
@@ -234,6 +250,7 @@ static bool kickHaMqtt() {
     if (millis() < haReconnect.nextAttemptMs) return false;
     Log.printf("[MQTT HA] connecting %s:%d (backoff=%u)\n", MQTT_HA_HOST, MQTT_HA_PORT,
                (unsigned)haReconnect.backoffMs);
+    freshClient(haTcp, mqttHa);
     mqttHa.setServer(MQTT_HA_HOST, MQTT_HA_PORT);
     mqttHa.setCallback(onHaMessage);
     mqttHa.setBufferSize(1536);   // discovery ~400 B, relay state ~1 KB
@@ -323,7 +340,9 @@ void loop() {
     g_crumb = 6; if (haOk)  mqttHa.loop();
 
     g_crumb = 7; relays.tick();
-    g_crumb = 8; alerts.tick(relays, haOk && mqttHa.connected());
+    // haOk already says whether the HA link is up; every extra connected()
+    // is another touch of the TCP context, so don't ask again this pass.
+    g_crumb = 8; alerts.tick(relays, haOk);
 
     static bool netServicesStarted = false;
     if (wifiUp) {
@@ -338,7 +357,9 @@ void loop() {
 
     g_crumb = 11; if (haOk) haRelays.tick();
     g_crumb = 0;
-    delay(2);
+    // 10 ms is plenty for relays, MQTT and the web page, and cuts the number
+    // of passes (and TCP-context touches) fivefold compared with 2 ms.
+    delay(10);
 }
 
 #endif  // ESP8266

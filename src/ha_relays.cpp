@@ -238,7 +238,9 @@ void HaRelays::handleSignedCommand(const uint8_t* payload, unsigned int length) 
 }
 
 void HaRelays::tick() {
-    if (!_mqtt || !_mqtt->connected()) return;
+    // Callers only tick while the link is up; no extra connected() here (on
+    // ESP8266 every call touches the TCP context, see main_nodemcu.cpp).
+    if (!_mqtt) return;
     String alert;
     while (alerts.peekHaMessage(alert)) {
         if (!_mqtt->publish(kAlertTopic, alert.c_str(), false)) {
