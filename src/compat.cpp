@@ -39,14 +39,28 @@ void compatFeedWatchdog() { esp_task_wdt_reset(); }
 // --- crash black box -------------------------------------------------------
 // The ESP8266 core calls custom_crash_callback() on an exception, right before
 // the reset. RTC user memory survives the reset (not a power loss).
+// Besides the exception registers we keep the first code addresses found on
+// the stack — a poor man's backtrace (decode with xtensa-lx106-elf-addr2line
+// against the saved firmware.elf).
+static constexpr int kCrashTrace = 16;
 struct CrashRecord {
     uint32_t magic, reason, exccause, epc1, epc2, epc3, excvaddr, depc, uptimeS, freeHeap;
+    uint32_t trace[kCrashTrace];
 };
-static constexpr uint32_t kCrashMagic = 0xDAC4A001;
+static constexpr uint32_t kCrashMagic = 0xDAC4A002;
 
-extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t, uint32_t) {
+static bool isCodeAddr(uint32_t a) {
+    return (a >= 0x40200000 && a < 0x40300000) || (a >= 0x40100000 && a < 0x40108000);
+}
+
+extern "C" void custom_crash_callback(struct rst_info* ri, uint32_t stack, uint32_t stack_end) {
     CrashRecord r{kCrashMagic, ri->reason, ri->exccause, ri->epc1, ri->epc2, ri->epc3,
-                  ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap()};
+                  ri->excvaddr, ri->depc, (uint32_t)(millis() / 1000), ESP.getFreeHeap(), {}};
+    int n = 0;
+    for (uint32_t p = stack; p + 4 <= stack_end && n < kCrashTrace; p += 4) {
+        uint32_t v = *(uint32_t*)p;
+        if (isCodeAddr(v)) r.trace[n++] = v;
+    }
     ESP.rtcUserMemoryWrite(0, (uint32_t*)&r, sizeof(r));
 }
 
@@ -58,7 +72,13 @@ String compatLastCrash() {
     char buf[160];
     snprintf(buf, sizeof(buf), "exccause=%u epc1=0x%08x epc2=0x%08x excvaddr=0x%08x depc=0x%08x "
              "after %us, free heap %u", r.exccause, r.epc1, r.epc2, r.excvaddr, r.depc, r.uptimeS, r.freeHeap);
-    return String(buf);
+    String s(buf);
+    s += "; trace:";
+    for (int i = 0; i < kCrashTrace && r.trace[i]; i++) {
+        snprintf(buf, sizeof(buf), " %08x", r.trace[i]);
+        s += buf;
+    }
+    return s;
 }
 
 String compatHmacSha256Hex(const String& key, const String& msg) {

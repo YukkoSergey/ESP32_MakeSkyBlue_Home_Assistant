@@ -61,6 +61,10 @@ static void unlock() { s_mutex.unlock(); }
 static void setError(const String& e) { lock(); s_lastError = e; unlock(); }
 
 static void enqueueTelegram(const String& text, int ackKey = -1) {
+#if defined(ESP8266)
+    (void)text; (void)ackKey;
+    return;   // no direct Telegram here (see kTelegramUnsupported); don't hoard RAM
+#endif
     lock();
     if (s_queue.size() >= kMaxQueue) s_queue.erase(s_queue.begin());   // drop oldest
     s_queue.push_back({text, ackKey});
