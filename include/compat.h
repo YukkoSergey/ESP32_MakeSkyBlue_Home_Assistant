@@ -84,6 +84,10 @@ String compatLastCrash();
 extern volatile uint8_t  g_crumb;
 extern volatile uint16_t g_wifiDrops;
 
+// Save a "guard zone hit" into the black box (bytes that overwrote a canary
+// zone, and which zone) and reboot cleanly. ESP8266 only; no-op elsewhere.
+void compatGuardTripped(uint32_t zone, const uint8_t* bytes, size_t n);
+
 // HMAC-SHA256 as lowercase hex (signed commands from the VPS bridge).
 String compatHmacSha256Hex(const String& key, const String& msg);
 

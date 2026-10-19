@@ -29,28 +29,65 @@ static const char* kFirmwareBuild = __DATE__ " " __TIME__;
 static const char* kHostname = "dacha-relays";
 static const char* kTimeZone = "EET-2EEST,M3.5.0/3,M10.5.0/4";   // Kyiv
 
-// A fresh WiFiClient for every connection attempt (see freshClient()).
-static WiFiClient*  lanTcp = nullptr;
-static PubSubClient mqttLan;
-static WiFiClient*  haTcp = nullptr;
-static PubSubClient mqttHa;
+// Canary zones around each WiFiClient: the crash trace showed the HA
+// client's object (its vtable pointer) overwritten by something that looked
+// like MQTT packet bytes. checkGuards() catches the overwrite every loop pass
+// and records the intruding bytes before anything calls into the object.
+struct GuardedClient {
+    static constexpr uint32_t kCanary = 0xA5C3E1F0;
+    uint32_t   pre[12];
+    WiFiClient c;
+    uint32_t   post[12];
+    uint32_t   vtbl;   // the object's vtable pointer as constructed
+    GuardedClient() {
+        for (auto& w : pre) w = kCanary;
+        for (auto& w : post) w = kCanary;
+        vtbl = *(const uint32_t*)&c;
+    }
+    int damaged() const {
+        for (auto w : pre)  if (w != kCanary) return 1;
+        for (auto w : post) if (w != kCanary) return 2;
+        if (*(const uint32_t*)&c != vtbl) return 3;   // object itself hit
+        return 0;
+    }
+};
+
+// A fresh client for every connection attempt (see freshClient()).
+static GuardedClient* lanTcp = nullptr;
+static PubSubClient   mqttLan;
+static GuardedClient* haTcp = nullptr;
+static PubSubClient   mqttHa;
+
+static void checkGuards() {
+    GuardedClient* gs[2] = {lanTcp, haTcp};
+    for (int i = 0; i < 2; i++) {
+        if (!gs[i]) continue;
+        int where = gs[i]->damaged();
+        if (!where) continue;
+        // zone: 1x = LAN client, 2x = HA client; x=1 before the object, 2 after
+        const uint8_t* bytes = where == 1 ? (const uint8_t*)gs[i]->pre
+                             : where == 2 ? (const uint8_t*)gs[i]->post
+                                          : (const uint8_t*)&gs[i]->c;
+        compatGuardTripped((i + 1) * 10 + where, bytes, 48);
+    }
+}
 
 // Never reuse a WiFiClient after its connection died. On ESP8266 a
 // ClientContext left from a broken link (seen on the internet link to the HA
 // broker, WiFi itself fine) keeps a dangling lwIP pcb, and the next
 // PubSubClient::connected() crashed in ClientContext::state(). Throwing the
 // object away and making a new one leaves nothing dangling to touch.
-static void freshClient(WiFiClient*& c, PubSubClient& mqtt) {
+static void freshClient(GuardedClient*& c, PubSubClient& mqtt) {
     if (c) {
-        c->stop();
+        c->c.stop();
         delete c;
     }
-    c = new WiFiClient();
+    c = new GuardedClient();
     // Short write timeout: on a slow internet link a publish waiting 5 s for
     // TCP acks (the default) stalled the whole loop — the web page went dark
     // for minutes before each crash.
-    c->setTimeout(1500);
-    mqtt.setClient(*c);
+    c->c.setTimeout(1500);
+    mqtt.setClient(c->c);
 }
 
 static RelayController  relays;
@@ -174,8 +211,8 @@ static int scanForBestNetwork() {
 static void stopNetClients() {
     mqttLan.disconnect();
     mqttHa.disconnect();
-    if (lanTcp) lanTcp->stop();
-    if (haTcp) haTcp->stop();
+    if (lanTcp) lanTcp->c.stop();
+    if (haTcp) haTcp->c.stop();
 }
 
 static void kickWifi() {
@@ -339,6 +376,7 @@ void setup() {
 }
 
 void loop() {
+    checkGuards();
     g_crumb = 1; kickWifi();
     g_crumb = 2; kickTime();
 
@@ -346,7 +384,9 @@ void loop() {
     g_crumb = 3; bool lanOk = wifiUp && kickLanMqtt();
     g_crumb = 4; bool haOk  = wifiUp && kickHaMqtt();
     g_crumb = 5; if (lanOk) mqttLan.loop();
+    checkGuards();
     g_crumb = 6; if (haOk)  mqttHa.loop();
+    checkGuards();
 
     g_crumb = 7; relays.tick();
     // haOk already says whether the HA link is up; every extra connected()
@@ -365,6 +405,7 @@ void loop() {
     }
 
     g_crumb = 11; if (haOk) haRelays.tick();
+    checkGuards();
     g_crumb = 0;
     // 10 ms is plenty for relays, MQTT and the web page, and cuts the number
     // of passes (and TCP-context touches) fivefold compared with 2 ms.
