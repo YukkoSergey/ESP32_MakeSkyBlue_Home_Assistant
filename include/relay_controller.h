@@ -113,7 +113,12 @@ public:
 
     void begin(const Settings& s);
     // Returns true if the topic was consumed.
+    bool handleMqttMessage(const char* topic, const char* payload);
     bool handleMqttMessage(const String& topic, const String& payload);
+    // The exact SA topics this controller listens to (subscribe to these,
+    // not to a wildcard).
+    static size_t inputTopicCount();
+    static const char* inputTopic(size_t i);
     void tick();
 
     void applySettings(const Settings& s);

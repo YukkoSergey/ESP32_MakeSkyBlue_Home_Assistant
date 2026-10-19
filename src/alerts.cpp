@@ -454,8 +454,10 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
              _crashInfo.length() ? "Дані збою: " + _crashInfo : String(), -1);
     }
 
+    // Alarm details are only built when an alarm starts (raise() ignores the
+    // text while active) — this runs every loop pass.
     // Stale SA data.
-    if (!r.socFresh() && now > kBootGraceMs) {
+    if (!r.socFresh() && now > kBootGraceMs && !_alarms[Stale].active) {
         raise(Stale, "Важке навантаження вимкнено (економ-режим). Перевір Solar Assistant, WiFi у сараї "
                      "і MQTT-брокер 192.168.31.251.");
     } else if (r.socFresh()) {
@@ -464,7 +466,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
 
     // Frozen SOC.
     if (r.socFrozen()) {
-        raise(Frozen, String("Значення стоїть на ") + r.soc() + " %: " + r.frozenReason() +
+        if (!_alarms[Frozen].active) raise(Frozen, String("Значення стоїть на ") + r.soc() + " %: " + r.frozenReason() +
                       ".\nСхоже, Solar Assistant не читає Pylontech (USB / консоль). Важке навантаження "
                       "вимкнено, генератор лишається як був. Перезапусти SA або перевір кабель до батарей.");
     } else {
@@ -473,7 +475,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
 
     // Voltage emergency.
     if (r.voltEmergency()) {
-        raise(VoltEmergency, String("Батарея нижче ") + String(RelayController::kVoltEmergencyV, 1) +
+        if (!_alarms[VoltEmergency].active) raise(VoltEmergency, String("Батарея нижче ") + String(RelayController::kVoltEmergencyV, 1) +
                              " В понад 5 хв — вона майже порожня, хоч би що показував SOC. Важке навантаження "
                              "вимкнено, генератор запускається (якщо не заборонений вручну). Перевір паливо.");
     } else {
@@ -482,7 +484,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
 
     // Generator commanded but not running (feedback contact).
     if (r.genNoStartAlarm()) {
-        raise(GenNoStart, "Реле генератора замкнуте вже понад 3 хв, а контакт зворотного зв'язку не замкнувся "
+        if (!_alarms[GenNoStart].active) raise(GenNoStart, "Реле генератора замкнуте вже понад 3 хв, а контакт зворотного зв'язку не замкнувся "
                           "(або розімкнувся). Генератор не завівся або зупинився сам: перевір паливо, "
                           "акумулятор генератора і АВР.");
     } else {
@@ -502,7 +504,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         if (haMqttConnected) clear(BrokerDown);
     } else {
         if (!_haDisconnectedSinceMs) _haDisconnectedSinceMs = now;
-        if (now - _haDisconnectedSinceMs >= kBrokerDownMs)
+        if (now - _haDisconnectedSinceMs >= kBrokerDownMs && !_alarms[BrokerDown].active)
             raise(BrokerDown, String("Плата не може підключитись до ") + MQTT_HA_HOST + ":" + MQTT_HA_PORT +
                               " вже " + String((now - _haDisconnectedSinceMs) / 60000) +
                               " хв. HA не отримує даних і не надішле push. Перевір VPS.");
@@ -510,9 +512,9 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
 
     // HA itself (only once its heartbeat automation has been seen).
     if (haMqttConnected && _haOffline) {
-        raise(HaDown, "HA повідомив через MQTT, що він offline (LWT). Push-сповіщень з телефона не буде.");
+        if (!_alarms[HaDown].active) raise(HaDown, "HA повідомив через MQTT, що він offline (LWT). Push-сповіщень з телефона не буде.");
     } else if (haMqttConnected && _lastHeartbeatMs && now - _lastHeartbeatMs >= kHaHeartbeatMs) {
-        raise(HaDown, "Немає пульсу від HA вже " + String((now - _lastHeartbeatMs) / 60000) +
+        if (!_alarms[HaDown].active) raise(HaDown, "Немає пульсу від HA вже " + String((now - _lastHeartbeatMs) / 60000) +
                       " хв, хоча брокер працює. Push-сповіщень з телефона не буде. Перевір HA на VPS.");
     } else if (haMqttConnected && !_haOffline && _lastHeartbeatMs && now - _lastHeartbeatMs < kHaHeartbeatMs) {
         clear(HaDown);
@@ -539,7 +541,8 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
              String("Режим ") + RelayController::genModeName(r.genMode()) + ", запас " + res + ".", -1);
     }
 
-    // Text for /status.
+    // Text for /status (direct Telegram only; on ESP8266 the VPS answers).
+#if !defined(ESP8266)
     static uint32_t lastStatus = 0;
     if (now - lastStatus > 5000) {
         lastStatus = now;
@@ -553,6 +556,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         s_statusText = st;
         unlock();
     }
+#endif
 }
 
 void Alerts::fillStatus(JsonObject o) const {

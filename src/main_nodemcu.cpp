@@ -67,18 +67,21 @@ static void onHaMessage(char* topic, byte* payload, unsigned int length) {
 
 // Solar Assistant lives on the LAN broker only; the VPS bridge needs these
 // six values for the Tuya virtual MUST device (and HA keeps their history).
-// Forwarded on change, and at least once a minute.
-static String   saLast[virtualMapSize];
+// Forwarded on change, and at least once a minute. Fixed buffers: this runs
+// for every SA message and must not touch the heap.
+static char     saLast[virtualMapSize][16];
 static uint32_t saSentMs[virtualMapSize];
 
-static void forwardSa(const String& topic, const String& value) {
+static void forwardSa(const char* topic, const char* value) {
     for (int i = 0; i < virtualMapSize; i++) {
-        if (topic != virtualDeviceMap[i].mqttTopic) continue;
+        if (strcmp(topic, virtualDeviceMap[i].mqttTopic) != 0) continue;
         if (!mqttHa.connected()) return;
-        if (value == saLast[i] && millis() - saSentMs[i] < 60000) return;
-        String t = String("dacha_relays/sa/") + virtualDeviceMap[i].tuyaCode;
-        if (mqttHa.publish(t.c_str(), value.c_str(), false)) {
-            saLast[i] = value;
+        if (strcmp(value, saLast[i]) == 0 && millis() - saSentMs[i] < 60000) return;
+        char t[48];
+        snprintf(t, sizeof(t), "dacha_relays/sa/%s", virtualDeviceMap[i].tuyaCode);
+        if (mqttHa.publish(t, value, false)) {
+            strncpy(saLast[i], value, sizeof(saLast[i]) - 1);
+            saLast[i][sizeof(saLast[i]) - 1] = 0;
             saSentMs[i] = millis();
         }
         return;
@@ -86,12 +89,25 @@ static void forwardSa(const String& topic, const String& value) {
 }
 
 static void onLanMessage(char* topic, byte* payload, unsigned int length) {
-    String message;
-    message.reserve(length);
-    for (unsigned int i = 0; i < length; i++) message += (char)payload[i];
-    String t(topic);
-    relays.handleMqttMessage(t, message);
-    forwardSa(t, message);
+    char value[32];   // SA payloads are short numbers / words
+    unsigned int n = length < sizeof(value) - 1 ? length : sizeof(value) - 1;
+    memcpy(value, payload, n);
+    value[n] = 0;
+    relays.handleMqttMessage(topic, value);
+    forwardSa(topic, value);
+}
+
+// Exact topics instead of solar_assistant/total/# and inverter_1/#: SA
+// publishes dozens of values every few seconds and we need eight.
+static void subscribeLan() {
+    for (size_t i = 0; i < RelayController::inputTopicCount(); i++)
+        mqttLan.subscribe(RelayController::inputTopic(i));
+    for (int i = 0; i < virtualMapSize; i++) {
+        bool dup = false;
+        for (size_t k = 0; k < RelayController::inputTopicCount(); k++)
+            if (strcmp(virtualDeviceMap[i].mqttTopic, RelayController::inputTopic(k)) == 0) dup = true;
+        if (!dup) mqttLan.subscribe(virtualDeviceMap[i].mqttTopic);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -190,11 +206,7 @@ static bool kickLanMqtt() {
     }
     Log.println("[MQTT LAN] connected");
     resetBackoff(lanReconnect);
-    mqttLan.subscribe("solar_assistant/total/#");
-    mqttLan.subscribe("solar_assistant/inverter_1/#");
-#ifdef RELAY_TOPIC_PREFIX
-    mqttLan.subscribe(RELAY_TOPIC_PREFIX "#");
-#endif
+    subscribeLan();
     return true;
 }
 

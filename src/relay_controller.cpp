@@ -42,21 +42,33 @@ static void writeRelay(uint8_t pin, bool on) {
 }
 
 // Strict number parse: "unavailable" and friends must not become 0.
-static bool parseNumber(const String& payload, float& out) {
-    String s = payload;
-    s.trim();
-    if (s.isEmpty()) return false;
+// Works on the raw payload — no String, no heap: this runs for every SA
+// message, and heap churn is what the ESP8266 can least afford.
+static bool parseNumber(const char* p, float& out) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    const char* start = p;
     bool seenDigit = false, seenDot = false;
-    for (unsigned i = 0; i < s.length(); i++) {
-        char c = s[i];
-        if (i == 0 && (c == '-' || c == '+')) continue;
+    for (; *p && *p != ' ' && *p != '\r' && *p != '\n'; p++) {
+        char c = *p;
+        if (p == start && (c == '-' || c == '+')) continue;
         if (c == '.' && !seenDot) { seenDot = true; continue; }
         if (!isdigit((unsigned char)c)) return false;
         seenDigit = true;
     }
     if (!seenDigit) return false;
-    out = s.toFloat();
+    out = (float)atof(start);
     return true;
+}
+
+static const char* const kInputTopics[] = {
+    kSocTopic, kBatteryPowerTopic, kLoadTopic, kGridVTopic, kInvBatVTopic, kInvBatITopic,
+};
+
+size_t RelayController::inputTopicCount() { return sizeof(kInputTopics) / sizeof(kInputTopics[0]); }
+const char* RelayController::inputTopic(size_t i) { return kInputTopics[i]; }
+
+bool RelayController::handleMqttMessage(const String& topic, const String& payload) {
+    return handleMqttMessage(topic.c_str(), payload.c_str());
 }
 
 void RelayController::begin(const Settings& s) {
@@ -229,9 +241,9 @@ void RelayController::onInverterBatteryVoltage(float v) {
     }
 }
 
-bool RelayController::handleMqttMessage(const String& topic, const String& payload) {
+bool RelayController::handleMqttMessage(const char* topic, const char* payload) {
     float v;
-    if (topic == kLoadTopic) {
+    if (strcmp(topic, kLoadTopic) == 0) {
         if (!parseNumber(payload, v)) return true;
         uint32_t now = millis();
         bool gridFresh = _gridV >= 0 && now - _lastGridVMs < kAuxStaleMs;
@@ -244,17 +256,17 @@ bool RelayController::handleMqttMessage(const String& topic, const String& paylo
         _lastLoadMs = now;
         return true;
     }
-    if (topic == kGridVTopic) {
+    if (strcmp(topic, kGridVTopic) == 0) {
         if (!parseNumber(payload, v)) return true;
         _gridV = v;
         _lastGridVMs = millis();
         return true;
     }
-    if (topic == kInvBatVTopic) {
+    if (strcmp(topic, kInvBatVTopic) == 0) {
         if (parseNumber(payload, v)) onInverterBatteryVoltage(v);
         return true;
     }
-    if (topic == kInvBatITopic) {
+    if (strcmp(topic, kInvBatITopic) == 0) {
         if (!parseNumber(payload, v)) return true;
         uint32_t now = millis();
         bool vFresh = _invBatV > 0 && now - _lastInvBatVMs < kAuxStaleMs;
@@ -267,7 +279,7 @@ bool RelayController::handleMqttMessage(const String& topic, const String& paylo
         if (vFresh) _invBatW = _invBatV * v;
         return true;
     }
-    if (topic == kBatteryPowerTopic) {
+    if (strcmp(topic, kBatteryPowerTopic) == 0) {
         if (!parseNumber(payload, v)) return true;
         uint32_t now = millis();
         // Integrate what actually reaches the battery while the generator
@@ -282,10 +294,10 @@ bool RelayController::handleMqttMessage(const String& topic, const String& paylo
         updateChargerDetect();
         return true;
     }
-    if (topic != kSocTopic) return false;
+    if (strcmp(topic, kSocTopic) != 0) return false;
 
     if (!parseNumber(payload, v) || v < 0 || v > 100) {
-        Log.printf("[Relays] ignoring invalid SOC '%s'\n", payload.c_str());
+        Log.printf("[Relays] ignoring invalid SOC '%s'\n", payload);
         return true;
     }
     int newSoc = (int)v;
