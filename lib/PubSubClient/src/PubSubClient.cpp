@@ -3,6 +3,15 @@
   PubSubClient.cpp - A simple client for MQTT.
   Nick O'Leary
   http://knolleary.net
+
+  Local patch (esp32-dacha), see PATCHED_DACHA below. On a weak WiFi link
+  upstream 2.8 let the MQTT stream desync both ways:
+   * read: after a timeout mid-packet it parsed the rest as a new packet and
+     trusted the garbage topic length -> memmove far past the buffer -> heap
+     corruption (crash-looped the NodeMCU);
+   * write: a short write left half a packet on the wire and the next
+     packet's bytes became its payload (a PINGREQ 0xC0 inside a JSON state).
+  Both now drop the connection instead.
 */
 
 #include "PubSubClient.h"
@@ -383,7 +392,11 @@ boolean PubSubClient::loop() {
             } else {
                 this->buffer[0] = MQTTPINGREQ;
                 this->buffer[1] = 0;
-                _client->write(this->buffer,2);
+                if (_client->write(this->buffer,2) != 2) {   // PATCHED_DACHA: see write()
+                    _state = MQTT_CONNECTION_LOST;
+                    _client->stop();
+                    return false;
+                }
                 lastOutActivity = t;
                 lastInActivity = t;
                 pingOutstanding = true;
@@ -422,7 +435,11 @@ boolean PubSubClient::loop() {
                             this->buffer[1] = 2;
                             this->buffer[2] = (msgId >> 8);
                             this->buffer[3] = (msgId & 0xFF);
-                            _client->write(this->buffer,4);
+                            if (_client->write(this->buffer,4) != 4) {   // PATCHED_DACHA
+                                _state = MQTT_CONNECTION_LOST;
+                                _client->stop();
+                                return false;
+                            }
                             lastOutActivity = t;
 
                         } else {
@@ -433,7 +450,11 @@ boolean PubSubClient::loop() {
                 } else if (type == MQTTPINGREQ) {
                     this->buffer[0] = MQTTPINGRESP;
                     this->buffer[1] = 0;
-                    _client->write(this->buffer,2);
+                    if (_client->write(this->buffer,2) != 2) {   // PATCHED_DACHA
+                        _state = MQTT_CONNECTION_LOST;
+                        _client->stop();
+                        return false;
+                    }
                 } else if (type == MQTTPINGRESP) {
                     pingOutstanding = false;
                 }
@@ -612,7 +633,16 @@ boolean PubSubClient::write(uint8_t header, uint8_t* buf, uint16_t length) {
 #else
     rc = _client->write(buf+(MQTT_MAX_HEADER_SIZE-hlen),length+hlen);
     lastOutActivity = millis();
-    return (rc == hlen+length);
+    // PATCHED_DACHA: a short write (slow link, write timeout) leaves half a
+    // packet on the wire; the next packet's bytes then become its "payload"
+    // (a PINGREQ 0xC0 showed up inside a JSON state message). Drop the
+    // connection so the stream can't desync.
+    if (rc != hlen+length) {
+        _state = MQTT_CONNECTION_LOST;
+        _client->stop();
+        return false;
+    }
+    return true;
 #endif
 }
 
