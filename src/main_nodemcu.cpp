@@ -277,7 +277,10 @@ static bool kickLanMqtt() {
     freshClient(lanTcp, mqttLan);
     mqttLan.setServer(MQTT_LAN_HOST, MQTT_LAN_PORT);
     mqttLan.setCallback(onLanMessage);
-    mqttLan.setSocketTimeout(2);
+    // 5 s: a packet delayed on the weak WiFi link is fine; with the patched
+    // PubSubClient a mid-packet timeout drops the connection, and 2 s did
+    // that every few minutes on the LAN link.
+    mqttLan.setSocketTimeout(5);
     mqttLan.setKeepAlive(60);   // weak WiFi in the shed: don't drop on a few lost packets
     if (!mqttLan.connect("nodemcu-relays-lan", MQTT_LAN_USERNAME, MQTT_LAN_PASSWORD)) {
         Log.printf("[MQTT LAN] connect failed rc=%d\n", mqttLan.state());
