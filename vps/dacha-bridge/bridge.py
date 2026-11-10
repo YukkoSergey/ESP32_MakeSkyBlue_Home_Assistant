@@ -12,6 +12,10 @@ shouldn't do:
      signed ack goes back to the board.
   4. Watchdogs that only an outside observer can do: the shed board went
      silent; Home Assistant stopped answering.
+  5. Generator / heavy-load control from Home Assistant: POST /cmd on a
+     cluster-internal HTTP port (bearer HA_CMD_TOKEN), sent to the board as
+     the same signed command Telegram uses. The board has no TLS to the
+     broker, so it never takes commands from HA directly.
 
 Config comes from environment variables (k8s Secret). Small state (Telegram
 chat, daily-generation baselines) lives in retained MQTT topics, so the pod
@@ -29,6 +33,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 import paho.mqtt.client as mqtt
@@ -55,6 +60,11 @@ MSB_SERIALS = [x for x in E("MSB_SERIALS", "msb1,msb2,msb3").split(",") if x]
 TG_TOKEN = E("TG_TOKEN", "")
 CMD_SECRET = E("CMD_SECRET", "")
 HA_URL = E("HA_URL", "http://homeassistant.homeassistant.svc.cluster.local:8123")
+HA_CMD_TOKEN = E("HA_CMD_TOKEN", "")   # empty = HTTP control off
+HTTP_PORT = int(E("HTTP_PORT", "8080"))
+
+# Board commands anyone outside Telegram may send, and their allowed values.
+BOARD_COMMANDS = {"gen_mode": {"auto", "run", "off"}, "heavy_mode": {"auto", "on", "off"}}
 
 FIRMWARE = "vps-bridge-1.0"
 BOARD_SILENT_S = 5 * 60
@@ -380,6 +390,8 @@ class Bridge:
         self.board_last = 0.0
         self.watch = {}   # our own alarms: key -> {"active", "since", "last"}
         self.ha_lwt_offline = False
+        self.cmd_lock = threading.Lock()
+        self.last_cmd_ts = 0
         self.mq = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="dacha-bridge")
         self.mq.username_pw_set(MQTT_USER, MQTT_PASS)
         self.mq.will_set(f"{MSB_SERIALS[0]}/online", "offline", qos=1)
@@ -448,35 +460,47 @@ class Bridge:
     def send_board_cmd(self, cmd: str, arg: str):
         if not CMD_SECRET:
             return
-        ts = int(time.time())
+        with self.cmd_lock:
+            # The board rejects t <= the last one it took, so two commands in
+            # the same second (Telegram + HA, ack + mode) must not share t.
+            ts = max(int(time.time()), self.last_cmd_ts + 1)
+            self.last_cmd_ts = ts
         sig = hmac.new(CMD_SECRET.encode(), f"{cmd}|{arg}|{ts}".encode(), hashlib.sha256).hexdigest()
         self.mq.publish("dacha_relays/cmd", json.dumps({"c": cmd, "a": arg, "t": ts, "s": sig}))
 
-    def run_board_command(self, cmd: str, arg: str):
-        """Send a signed command and report what the board did (from its state)."""
+    def exec_board_command(self, cmd: str, arg: str, source: str) -> tuple[bool, str]:
+        """Send a signed command and wait for the board's state to confirm it.
+
+        Returns (confirmed, text for the user)."""
         s = self.board_state
         if not s or time.time() - self.board_last > BOARD_SILENT_S:
-            self.tg.send("⚠️ Плата зараз не на зв'язку — команду не надіслано.")
-            return
+            return False, "⚠️ Плата зараз не на зв'язку — команду не надіслано."
         if cmd == "gen_mode" and arg == "run":
             goal = (s.get("thresholds") or {}).get("gen_stop_kwh")
             if goal is not None and (s.get("reserve_kwh") or 0) >= goal:
-                self.tg.send(f"ℹ️ Запас {s.get('reserve_kwh')} кВт·год уже не нижчий за мету {goal} кВт·год — "
-                             "плата одразу поверне «авто», генератор не запуститься.")
-                return
+                return False, (f"ℹ️ Запас {s.get('reserve_kwh')} кВт·год уже не нижчий за мету {goal} кВт·год — "
+                               "плата одразу поверне «авто», генератор не запуститься.")
         before = time.time()
         self.send_board_cmd(cmd, arg)
-        log.info("board command %s=%s from Telegram", cmd, arg)
-        key = cmd
+        log.info("board command %s=%s from %s", cmd, arg, source)
         for _ in range(20):                      # the board republishes its state right away
             time.sleep(1)
-            if self.board_last > before and self.board_state.get(key) == arg:
+            if self.board_last > before and self.board_state.get(cmd) == arg:
                 break
         s = self.board_state
-        if self.board_last <= before or s.get(key) != arg:
-            self.tg.send(f"⚠️ Плата не підтвердила команду ({cmd} = {arg}). Перевір /status.")
-            return
-        self.tg.send(self.gen_text() if cmd == "gen_mode" else self.heavy_text())
+        if self.board_last <= before or s.get(cmd) != arg:
+            return False, f"⚠️ Плата не підтвердила команду ({cmd} = {arg}). Перевір /status."
+        return True, self.gen_text() if cmd == "gen_mode" else self.heavy_text()
+
+    def run_board_command(self, cmd: str, arg: str):
+        """Telegram button: run the command and answer in the chat."""
+        self.tg.send(self.exec_board_command(cmd, arg, "Telegram")[1])
+
+    def ha_board_command(self, cmd: str, arg: str) -> tuple[bool, str]:
+        """Home Assistant: run the command, mirror it to Telegram for the record."""
+        ok, text = self.exec_board_command(cmd, arg, "Home Assistant")
+        self.tg.send(f"🏠 Команда з Home Assistant: {cmd} = {MODE_UA.get(arg, arg)}.\n" + text)
+        return ok, text
 
     def gen_text(self) -> str:
         s = self.board_state
@@ -608,12 +632,59 @@ class Bridge:
         time.sleep(3)   # retained chat / baselines first
         for target in (self.loop_mppt, self.loop_publish, self.loop_sa, self.loop_watch):
             threading.Thread(target=target, daemon=True).start()
+        if HA_CMD_TOKEN:
+            srv = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), make_http_handler(self))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            log.info("HA control on :%d", HTTP_PORT)
         if TG_TOKEN:
             self.tg.setup_menu()
             self.tg.poll_forever()
         else:
             while True:
                 time.sleep(3600)
+
+
+# =============================================================================
+# HTTP control for Home Assistant (cluster-internal Service only)
+# =============================================================================
+def make_http_handler(bridge: Bridge):
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self, code: int, body: dict):
+            raw = json.dumps(body, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path == "/healthz":
+                self._reply(200, {"ok": True})
+            else:
+                self._reply(404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/cmd":
+                return self._reply(404, {"error": "not found"})
+            auth = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(auth, "Bearer " + HA_CMD_TOKEN):
+                log.warning("HA control: bad token from %s", self.client_address[0])
+                return self._reply(401, {"error": "unauthorized"})
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 1024)
+                d = json.loads(self.rfile.read(n) or b"{}")
+                cmd, arg = str(d.get("c", "")), str(d.get("a", ""))
+            except Exception:
+                return self._reply(400, {"error": "bad json"})
+            if arg not in BOARD_COMMANDS.get(cmd, ()):
+                return self._reply(400, {"error": f"unknown command {cmd}={arg}"})
+            ok, text = bridge.ha_board_command(cmd, arg)
+            self._reply(200 if ok else 409, {"ok": ok, "text": text})
+
+        def log_message(self, fmt, *args):   # keep the pod log to our own lines
+            pass
+
+    return Handler
 
 
 if __name__ == "__main__":

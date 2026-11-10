@@ -146,7 +146,15 @@ and Mosquitto) — see `vps/dacha-bridge/bridge.py` and `k8s/deployment.yaml`:
 - Signed commands `dacha_relays/cmd` = {c, a, t, s}, s = HMAC-SHA256(CMD_SECRET,
   "c|a|t"), ±5 min, monotonic t.
 
-Secrets live in the k8s Secret `dacha-bridge-env` only.
+- Home Assistant control: `POST /cmd` on the cluster-internal Service
+  `dacha-bridge:8080` (bearer `HA_CMD_TOKEN`) -> the same signed command.
+  HA side: `vps/home-assistant/packages/dacha_generator.yaml` (rest_command +
+  `script.dacha_board_cmd`) and a "Дача" dashboard view with buttons; risky
+  ones (generator run, heavy load on) ask for confirmation. Every HA command is
+  mirrored to Telegram. Deploy: `bash vps/home-assistant/deploy_generator_control.sh`.
+
+Secrets live in the k8s Secret `dacha-bridge-env` only (plus the matching
+`dacha_bridge_auth` line in HA `secrets.yaml`).
 
 ## Alerts (Telegram)
 
