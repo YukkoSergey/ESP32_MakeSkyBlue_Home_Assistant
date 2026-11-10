@@ -614,7 +614,9 @@ class Bridge:
                              "WiFi або інтернет на дачі, плата зависла. Реле без плати відпущені "
                              "(економ, генератор від плати не запуститься).")
             try:
-                requests.get(HA_URL + "/api/", timeout=10)
+                # Public endpoint: /api/ without a token made HA log (and
+                # notify about) a failed login every minute.
+                requests.get(HA_URL + "/manifest.json", timeout=10).raise_for_status()
                 ha_fails = 0
             except Exception:
                 ha_fails += 1
