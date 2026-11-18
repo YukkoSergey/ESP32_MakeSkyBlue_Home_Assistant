@@ -47,6 +47,7 @@ void setup() {
 #endif
     digitalWrite(5, kReleased); pinMode(5, OUTPUT);   // D1 heavy load
     digitalWrite(4, kReleased); pinMode(4, OUTPUT);   // D2 generator
+    digitalWrite(12, kReleased); pinMode(12, OUTPUT); // D6 relay 3
     Serial.begin(115200);
     Serial.println("\n[Boot] NodeMCU OTA bootstrap");
     connectStrongest();

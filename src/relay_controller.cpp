@@ -74,7 +74,7 @@ bool RelayController::handleMqttMessage(const String& topic, const String& paylo
 void RelayController::begin(const Settings& s) {
     // Set the output latch to "off" before enabling the driver, so the relay
     // doesn't click on for a moment at boot.
-    for (uint8_t pin : {kHeavyLoadPin, kGeneratorPin}) {
+    for (uint8_t pin : {kHeavyLoadPin, kGeneratorPin, kAux1Pin}) {
         digitalWrite(pin, kRelayOffLevel);
 #if defined(ESP8266)
         pinMode(pin, OUTPUT);
@@ -449,6 +449,15 @@ void RelayController::applyOutputs() {
     }
     writeRelay(kHeavyLoadPin, _heavyOut);
     writeRelay(kGeneratorPin, _genOut);
+    writeRelay(kAux1Pin, _aux1Out);
+}
+
+void RelayController::setAux1(bool on, const char* source) {
+    if (on == _aux1Out) return;
+    Log.printf("[Relays] relay 3 %s (by %s)\n", on ? "ON" : "off", source);
+    _aux1Out = on;
+    _changes++;
+    writeRelay(kAux1Pin, _aux1Out);
 }
 
 void RelayController::persist() {
@@ -501,7 +510,8 @@ void RelayController::setGenMode(GenMode m, const char* source) {
 }
 
 void RelayController::resetState() {
-    Log.println("[Relays] state reset: both relays off, generator mode auto");
+    Log.println("[Relays] state reset: all relays off, generator mode auto");
+    _aux1Out = false;
     _heavyLatched = false;
     _genLatched = false;
     _genMode = GenMode::Auto;
@@ -537,9 +547,11 @@ void RelayController::fillStatus(JsonObject o) const {
 #if defined(ESP8266)
     o["pin_heavy"] = "D1 (GPIO5)";
     o["pin_gen"] = "D2 (GPIO4)";
+    o["pin_aux1"] = "D6 (GPIO12)";
 #else
     o["pin_heavy"] = "GPIO25";
     o["pin_gen"] = "GPIO26";
+    o["pin_aux1"] = "GPIO33";
 #endif
     o["charger_detected"] = _chargerDetected;
     o["gen_fb_enabled"] = _genFbEnabled;
@@ -554,6 +566,7 @@ void RelayController::fillStatus(JsonObject o) const {
     o["season_mode"] = settings::seasonModeName(_cfg.seasonMode);
     o["heavy_load"] = _heavyOut;
     o["generator"] = _genOut;
+    o["aux1"] = _aux1Out ? "on" : "off";   // string: the bridge compares it with the command arg
     o["gen_mode"] = genModeName(_genMode);
     o["heavy_mode"] = heavyModeName(_heavyMode);
     o["battery_w"] = _haveBatteryW ? (int)_batteryW : 0;

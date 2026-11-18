@@ -15,3 +15,4 @@ scripts/.env.*
 
 # Flash dumps contain WiFi passwords
 backups/
+__pycache__/

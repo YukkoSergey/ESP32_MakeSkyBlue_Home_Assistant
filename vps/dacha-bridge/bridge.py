@@ -64,7 +64,8 @@ HA_CMD_TOKEN = E("HA_CMD_TOKEN", "")   # empty = HTTP control off
 HTTP_PORT = int(E("HTTP_PORT", "8080"))
 
 # Board commands anyone outside Telegram may send, and their allowed values.
-BOARD_COMMANDS = {"gen_mode": {"auto", "run", "off"}, "heavy_mode": {"auto", "on", "off"}}
+BOARD_COMMANDS = {"gen_mode": {"auto", "run", "off"}, "heavy_mode": {"auto", "on", "off"},
+                  "aux1": {"on", "off"}}
 
 FIRMWARE = "vps-bridge-1.0"
 BOARD_SILENT_S = 5 * 60
@@ -286,6 +287,7 @@ class Telegram:
             {"command": "status", "description": "Поточний стан"},
             {"command": "gen", "description": "Генератор: запустити / заборонити / авто"},
             {"command": "heavy", "description": "Важке навантаження: авто / дозволити / заборонити"},
+            {"command": "relay3", "description": "Реле 3: замкнути / розімкнути"},
             {"command": "help", "description": "Підказка по командах"},
         ])
 
@@ -347,6 +349,9 @@ class Telegram:
             self.send(self.b.gen_text(), buttons=[
                 [("▶️ Запустити до мети", "ask:gen_mode:run")],
                 [("⏹ Заборонити", "do:gen_mode:off"), ("🔄 Авто", "do:gen_mode:auto")]])
+        elif text.startswith("/relay3"):
+            self.send(self.b.aux1_text(), buttons=[
+                [("🔌 Замкнути", "ask:aux1:on"), ("⭕ Розімкнути", "do:aux1:off")]])
         elif text.startswith("/heavy"):
             self.send(self.b.heavy_text(), buttons=[
                 [("🔄 Авто", "do:heavy_mode:auto"), ("⛔ Заборонити", "do:heavy_mode:off")],
@@ -358,6 +363,7 @@ class Telegram:
 
 
 CONFIRM_TEXT = {
+    ("aux1", "on"): "Замкнути реле 3 (D6)?",
     ("gen_mode", "run"): "Запустити генератор? Він працюватиме, доки запас не дійде до мети поточного сезону.",
     ("heavy_mode", "on"): "Дозволити важке навантаження незалежно від порогів? "
                           "Аварія за напругою і робота генератора все одно його вимкнуть.",
@@ -367,11 +373,13 @@ HELP_TEXT = (
     "/status — стан: заряд, запас, важке навантаження, генератор, мережа\n"
     "/gen — генератор: ▶️ запустити до мети / ⏹ заборонити / 🔄 авто\n"
     "/heavy — важке навантаження: 🔄 авто / ⛔ заборонити / ⚡ дозволити\n"
+    "/relay3 — реле 3 (D6), лише вручну: замкнути / розімкнути\n"
     "/help — ця підказка\n\n"
     "Тривоги приходять самі, з кнопкою «✅ Прийняв» — після неї нагадування припиняються.\n"
     "Запуск генератора і «дозволити» перепитують підтвердження. Команди йдуть на плату з підписом; "
     "бот слухає тільки цей чат."
 )
+AUX_UA = {"on": "замкнути", "off": "розімкнути"}
 MODE_UA = {"auto": "авто", "run": "запуск до мети", "off": "заборонено", "on": "дозволено вручну"}
 
 
@@ -475,6 +483,8 @@ class Bridge:
         s = self.board_state
         if not s or time.time() - self.board_last > BOARD_SILENT_S:
             return False, "⚠️ Плата зараз не на зв'язку — команду не надіслано."
+        if cmd == "aux1" and "aux1" not in s:
+            return False, self.aux1_text()
         if cmd == "gen_mode" and arg == "run":
             goal = (s.get("thresholds") or {}).get("gen_stop_kwh")
             if goal is not None and (s.get("reserve_kwh") or 0) >= goal:
@@ -490,7 +500,8 @@ class Bridge:
         s = self.board_state
         if self.board_last <= before or s.get(cmd) != arg:
             return False, f"⚠️ Плата не підтвердила команду ({cmd} = {arg}). Перевір /status."
-        return True, self.gen_text() if cmd == "gen_mode" else self.heavy_text()
+        texts = {"gen_mode": self.gen_text, "heavy_mode": self.heavy_text, "aux1": self.aux1_text}
+        return True, texts[cmd]()
 
     def run_board_command(self, cmd: str, arg: str):
         """Telegram button: run the command and answer in the chat."""
@@ -499,7 +510,8 @@ class Bridge:
     def ha_board_command(self, cmd: str, arg: str) -> tuple[bool, str]:
         """Home Assistant: run the command, mirror it to Telegram for the record."""
         ok, text = self.exec_board_command(cmd, arg, "Home Assistant")
-        self.tg.send(f"🏠 Команда з Home Assistant: {cmd} = {MODE_UA.get(arg, arg)}.\n" + text)
+        label = AUX_UA.get(arg, arg) if cmd == "aux1" else MODE_UA.get(arg, arg)
+        self.tg.send(f"🏠 Команда з Home Assistant: {cmd} = {label}.\n" + text)
         return ok, text
 
     def gen_text(self) -> str:
@@ -516,6 +528,14 @@ class Bridge:
                 f"{'ЗАМКНУТЕ' if s.get('generator') else 'розімкнуте'}.{fb}\n"
                 f"Запас {s.get('reserve_kwh')} кВт·год; авто-старт < {th.get('gen_start_kwh')}, "
                 f"мета / стоп > {th.get('gen_stop_kwh')}.")
+
+    def aux1_text(self) -> str:
+        s = self.board_state
+        if not s:
+            return "Від плати ще немає даних."
+        if "aux1" not in s:
+            return "Реле 3: прошивка плати його ще не знає (потрібне оновлення через OTA)."
+        return f"🔌 Реле 3 (D6): {'ЗАМКНУТЕ' if s.get('aux1') == 'on' else 'розімкнуте'}. Керується лише вручну."
 
     def heavy_text(self) -> str:
         s = self.board_state

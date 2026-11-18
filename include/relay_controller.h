@@ -14,6 +14,8 @@
 //                  in the house (boiler, floor heating, AC / heat pump may run
 //                  from the batteries). Hysteresis on reserve kWh.
 //   * Generator  — 2-wire autostart, contact held closed = generator runs.
+//   * Relay 3    — manual only (web UI, HA, Telegram via the VPS bridge); no
+//                  automatic rules yet. Off after every reboot, never persisted.
 //
 // Thresholds come from the active season profile (see settings.h).
 //
@@ -77,9 +79,11 @@ public:
 #if defined(ESP8266)
     static constexpr uint8_t  kHeavyLoadPin = 5;    // NodeMCU D1
     static constexpr uint8_t  kGeneratorPin = 4;    // NodeMCU D2
+    static constexpr uint8_t  kAux1Pin      = 12;   // NodeMCU D6, relay 3
 #else
     static constexpr uint8_t  kHeavyLoadPin = 25;   // was D1 (GPIO5) on the NodeMCU
     static constexpr uint8_t  kGeneratorPin = 26;   // was D2 (GPIO4) on the NodeMCU
+    static constexpr uint8_t  kAux1Pin      = 33;
 #endif
 
 #ifdef RELAY_SOC_STALE_MS
@@ -130,6 +134,9 @@ public:
     static bool parseHeavyMode(const String& s, HeavyMode& out);
     // Forget latched relay state and generator mode (back to Auto, both off).
     void resetState();
+    // Relay 3: manual on/off, nothing else drives it.
+    void setAux1(bool on, const char* source);
+    bool aux1On() const         { return _aux1Out; }
 
     GenMode genMode() const     { return _genMode; }
     bool heavyLoadOn() const    { return _heavyOut; }
@@ -228,6 +235,7 @@ private:
     // What's actually on the pins.
     bool     _heavyOut = false;
     bool     _genOut   = false;
+    bool     _aux1Out  = false;
 
     // Current / last generator session.
     uint32_t _genOnSinceMs  = 0;

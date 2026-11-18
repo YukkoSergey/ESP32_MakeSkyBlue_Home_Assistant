@@ -47,7 +47,10 @@ pre{margin:0;height:340px;overflow:auto;background:var(--bg);border:1px solid va
  <div class="card"><h2>Батарея і реле</h2><div class="kv" id="st"></div>
   <div class="row" style="margin-top:10px"><span class="mute">Важке навантаження:</span>
    <button data-h="auto">Авто</button><button data-h="on">Дозволити</button><button data-h="off">Заборонити</button>
-  </div><div class="mute" style="margin-top:6px">«Дозволити» обходить пороги, але аварія за напругою і робота генератора все одно вимикають важке навантаження.</div></div>
+  </div><div class="mute" style="margin-top:6px">«Дозволити» обходить пороги, але аварія за напругою і робота генератора все одно вимикають важке навантаження.</div>
+  <div class="row" style="margin-top:10px"><span class="mute">Реле 3 (D6):</span> <span id="aux1"></span>
+   <button data-a="on">Увімкнути</button><button data-a="off">Вимкнути</button>
+  </div><div class="mute" style="margin-top:6px">Лише вручну. Після перезавантаження плати — вимкнене.</div></div>
  <div class="card"><h2>Генератор</h2><div class="kv" id="gen"></div>
   <div class="row" style="margin-top:10px">
    <button data-m="auto">Авто</button><button data-m="run">Запустити до мети</button><button data-m="off">Заборонити</button>
@@ -175,6 +178,8 @@ async function status(){
    ['До мети',r.gen_eta_h<0?'—':'~'+r.gen_eta_h+' год']]);
   document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('sel',b.dataset.m==r.gen_mode));
   document.querySelectorAll('[data-h]').forEach(b=>b.classList.toggle('sel',b.dataset.h==r.heavy_mode));
+  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('sel',b.dataset.a==r.aux1));
+  $('aux1').innerHTML=onoff(r.aux1=='on','ЗАМКНУТЕ','розімкнуте');
   if($('fbOn'))$('fbOn').onclick=async()=>{if(confirm('Увімкнути зворотний зв\'язок від генератора? Контакт контактора генератора має бути підключений між D5 і G.')){await api('/api/gen_feedback',{method:'POST',body:'on'});status()}};
   lastStatus=j;renderAlarms(j.alerts);renderWhy(r);renderHow();
   kv($('sys'),[
@@ -351,6 +356,9 @@ $('save').onclick=async()=>{
 document.querySelectorAll('[data-h]').forEach(b=>b.onclick=async()=>{
  if(b.dataset.h=='on'&&!confirm('Дозволити важке навантаження незалежно від порогів?'))return;
  try{await api('/api/heavy_mode',{method:'POST',body:b.dataset.h});status()}catch(e){alert(e.message)}});
+document.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
+ if(b.dataset.a=='on'&&!confirm('Замкнути реле 3?'))return;
+ try{await api('/api/aux1',{method:'POST',body:b.dataset.a});status()}catch(e){alert(e.message)}});
 document.querySelectorAll('[data-m]').forEach(b=>b.onclick=async()=>{
  if(b.dataset.m!='auto'&&!confirm(b.textContent+'?'))return;
  try{await api('/api/gen_mode',{method:'POST',body:b.dataset.m});status()}catch(e){alert(e.message)}});
@@ -562,6 +570,18 @@ static void handleHeavyMode() {
     s_server->send(200, "text/plain", "ok");
 }
 
+static void handleAux1() {
+    if (!authed()) return;
+    String v = bodyWord("state");
+    v.trim();
+    if (v != "on" && v != "off") {
+        s_server->send(400, "text/plain", "state must be on|off");
+        return;
+    }
+    s_relays->setAux1(v == "on", "web");
+    s_server->send(200, "text/plain", "ok");
+}
+
 static void handleGenFeedback() {
     if (!authed()) return;
     String v = bodyWord("enabled");
@@ -659,6 +679,7 @@ void begin(CompatWebServer& server, RelayController& relays, SystemFiller fillSy
     server.on("/api/settings", HTTP_POST, handlePostSettings);
     server.on("/api/gen_mode", HTTP_POST, handleGenMode);
     server.on("/api/heavy_mode", HTTP_POST, handleHeavyMode);
+    server.on("/api/aux1", HTTP_POST, handleAux1);
     server.on("/api/gen_feedback", HTTP_POST, handleGenFeedback);
     server.on("/api/reset_state", HTTP_POST, handleResetState);
     server.on("/api/alerts/ack", HTTP_POST, handleAlertAck);

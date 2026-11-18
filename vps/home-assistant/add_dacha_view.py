@@ -55,6 +55,12 @@ view = {
                        "Дозволити важке навантаження незалежно від порогів? "
                        "Аварія по напрузі і робота генератора все одно його вимкнуть."),
         ]},
+        {"type": "grid", "cards": [
+            {"type": "heading", "heading": "Реле 3 (D6)", "icon": "mdi:electric-switch"},
+            tile("binary_sensor.dacha_relays_relay_3", "Реле 3"),
+            cmd_button("Замкнути", "mdi:electric-switch-closed", "aux1", "on", "Замкнути реле 3?"),
+            cmd_button("Розімкнути", "mdi:electric-switch", "aux1", "off"),
+        ]},
     ],
 }
 

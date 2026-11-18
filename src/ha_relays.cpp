@@ -10,6 +10,7 @@ static const char* kStateTopic       = "dacha_relays/state";
 static const char* kGenModeSetTopic  = "dacha_relays/gen_mode/set";
 static const char* kSeasonSetTopic   = "dacha_relays/season_mode/set";
 static const char* kHeavyModeSetTopic = "dacha_relays/heavy_mode/set";
+static const char* kAux1SetTopic     = "dacha_relays/aux1/set";
 static const char* kDiscoveryPrefix  = "homeassistant";
 static const char* kAlertTopic       = "dacha_relays/alert";
 static const char* kAlertAckTopic    = "dacha_relays/alert/ack";
@@ -80,6 +81,8 @@ void HaRelays::publishDiscovery() {
                   "{{ 'ON' if value_json.generator else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
     publishEntity("binary_sensor", "gen_fb", "Generator running (feedback)",
                   "{{ 'ON' if value_json.gen_fb_running else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
+    publishEntity("binary_sensor", "aux1", "Relay 3",
+                  "{{ 'ON' if value_json.aux1 == 'on' else 'OFF' }}", e.c_str());
     publishEntity("binary_sensor", "gen_no_start", "Generator did not start",
                   "{{ 'ON' if value_json.gen_no_start else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
     publishEntity("binary_sensor", "soc_frozen", "Battery SOC frozen",
@@ -107,7 +110,11 @@ void HaRelays::publishDiscovery() {
         publishEntity("select", "season_mode", "Season mode", "{{ value_json.season_mode }}",
                       (String("\"cmd_t\":\"") + kSeasonSetTopic +
                        "\",\"options\":[\"auto\",\"summer\",\"shoulder\",\"winter\"]").c_str());
+        publishEntity("switch", "aux1_sw", "Relay 3 switch", "{{ value_json.aux1 }}",
+                      (String("\"cmd_t\":\"") + kAux1SetTopic +
+                       "\",\"pl_on\":\"on\",\"pl_off\":\"off\",\"stat_on\":\"on\",\"stat_off\":\"off\"").c_str());
     } else {
+        clearEntity(_mqtt, "switch", "aux1_sw");
         clearEntity(_mqtt, "select", "gen_mode");
         clearEntity(_mqtt, "select", "season_mode");
         clearEntity(_mqtt, "select", "heavy_mode");
@@ -136,6 +143,7 @@ void HaRelays::onMqttConnected() {
         _mqtt->subscribe(kGenModeSetTopic);
         _mqtt->subscribe(kSeasonSetTopic);
         _mqtt->subscribe(kHeavyModeSetTopic);
+        _mqtt->subscribe(kAux1SetTopic);
         _mqtt->subscribe(kAlertAckTopic);
     }
     Log.printf("[HA relays] discovery published, commands %s\n",
@@ -174,14 +182,17 @@ bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned
     bool gen = strcmp(topic, kGenModeSetTopic) == 0;
     bool season = strcmp(topic, kSeasonSetTopic) == 0;
     bool heavy = strcmp(topic, kHeavyModeSetTopic) == 0;
-    if (!gen && !season && !heavy) return false;
+    bool aux1 = strcmp(topic, kAux1SetTopic) == 0;
+    if (!gen && !season && !heavy && !aux1) return false;
     if (!_commandsEnabled) return true;   // never act without TLS
 
     String v;
     for (unsigned i = 0; i < length; i++) v += (char)payload[i];
     v.trim();
 
-    if (heavy) {
+    if (aux1) {
+        if (v == "on" || v == "off") _relays.setAux1(v == "on", "HA");
+    } else if (heavy) {
         HeavyMode m;
         if (RelayController::parseHeavyMode(v, m)) _relays.setHeavyMode(m, "HA");
     } else if (gen) {
@@ -230,6 +241,8 @@ void HaRelays::handleSignedCommand(const uint8_t* payload, unsigned int length) 
     } else if (c == "gen_mode") {
         GenMode m;
         if (RelayController::parseGenMode(a, m)) _relays.setGenMode(m, "VPS");
+    } else if (c == "aux1") {
+        if (a == "on" || a == "off") _relays.setAux1(a == "on", "VPS");
     }
     publishState();
 #else
