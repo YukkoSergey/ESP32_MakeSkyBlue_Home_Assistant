@@ -11,7 +11,14 @@ shouldn't do:
      button; /status. Repeats of an acknowledged alarm are dropped here, and a
      signed ack goes back to the board.
   4. Watchdogs that only an outside observer can do: the shed board went
-     silent; Home Assistant stopped answering.
+     silent; Home Assistant stopped answering; the Tuya virtual device's SOC
+     (which Tuya scenes act on) drifted from the board's SOC or stopped updating.
+  6. Winter solar ballast: when the battery is full and the sun is still
+     there, Masha's heater (Tuya plug; ~560 W at minimum, own thermostat) soaks up what the MPPTs
+     would otherwise throttle away. On time and energy are counted per
+     heating season and shown in HA (MQTT discovery).
+  7. Electricity: the meter's T1/T2 registers -> HA (MQTT discovery); the
+     monthly report HA builds (dacha_bridge/electricity_report) -> Telegram.
   5. Generator / heavy-load control from Home Assistant: POST /cmd on a
      cluster-internal HTTP port (bearer HA_CMD_TOKEN), sent to the board as
      the same signed command Telegram uses. The board has no TLS to the
@@ -71,6 +78,29 @@ FIRMWARE = "vps-bridge-1.0"
 BOARD_SILENT_S = 5 * 60
 HA_DOWN_FAILS = 3          # consecutive failed checks, one per minute
 ALARM_REPEAT_S = 30 * 60   # our own watchdog alarms
+# Tuya SOC watchdog: Tuya scenes (floor, boiler, AC) act on the virtual
+# device's battery_percentage, so it must follow the SOC the board publishes
+# to HA (dacha_relays/state -> sensor.dacha_relays_battery_soc).
+TUYA_SOC_CHECK_S = 10 * 60
+TUYA_SOC_DIFF = 3          # percentage points
+TUYA_SOC_GRACE_S = 30 * 60 # mismatch must last this long
+TUYA_SOC_STALE_S = 6 * 3600  # Tuya value unchanged while the board's SOC moved
+TUYA_SOC_ALERT_HOURS = (9, 21)  # local time; at most one alert per day
+
+# Solar ballast (Masha's heater). Battery power from SA: + = charging.
+BALLAST_ID = E("BALLAST_ID", "bfb828322fc75c06d6ahl8")    # Masha Room heater plug
+METER_ID = E("METER_ID", "bfa20bdae7df3d38bbu0uc")        # 3-phase meter (chargers on A, B)
+BALLAST_SEASON = ((10, 15), (3, 15))   # heating season, (month, day) from / to
+BALLAST_HOURS = (9, 16)                # local time window
+BALLAST_SOC_ON, BALLAST_SOC_OFF = 99, 96
+BALLAST_PV_MIN = 100                   # W, sun is up; a full battery makes the MPPTs throttle PV down to ~load
+BALLAST_BAT_OK = -50                   # W, battery not discharging (to switch on)
+BALLAST_BAT_DRAIN = -250               # W, heater is eating the battery
+BALLAST_CHARGERS_KW = 0.1              # phase A+B, Cherokee chargers idle
+BALLAST_ON_DELAY_S = 5 * 60            # conditions must hold this long
+BALLAST_DRAIN_S = 3 * 60
+BALLAST_MIN_OFF_S = 10 * 60
+BALLAST_BACKOFF_S = (30 * 60, 60 * 60, 120 * 60)   # after attempts the sun couldn't carry
 
 
 # =============================================================================
@@ -142,6 +172,18 @@ class Tuya:
     def status(self, device_id: str):
         j = self._call("GET", f"/v1.0/iot-03/devices/{device_id}/status")
         return j["result"] if j else None
+
+    def shadow(self, device_id: str, code: str):
+        """(value, report time in s) of one property, from the cloud shadow."""
+        j = self._call("GET", f"/v2.0/cloud/thing/{device_id}/shadow/properties?codes={code}")
+        for p in (j or {}).get("result", {}).get("properties", []):
+            if p.get("code") == code:
+                return p.get("value"), p.get("time", 0) / 1000
+        return None
+
+    def command(self, device_id: str, code: str, value) -> bool:
+        body = {"commands": [{"code": code, "value": value}]}
+        return self._call("POST", f"/v1.0/devices/{device_id}/commands", body) is not None
 
     def report(self, device_id: str, dp_id: str, value) -> bool:
         body = {"data": {dp_id: {"value": value, "time": int(time.time() * 1000)}}}
@@ -392,12 +434,37 @@ class Bridge:
         self.msbs = [Msb(s, d) for s, d in zip(MSB_SERIALS, TUYA_MPPT_IDS)]
         self.sa_values: dict[str, str] = {}
         self.sa_sent: dict[str, str] = {}
+        self.sa_last = 0.0
         self.tg_chat = ""
         self.acked: set[str] = set()
         self.board_state: dict = {}
         self.board_last = 0.0
         self.watch = {}   # our own alarms: key -> {"active", "since", "last"}
         self.ha_lwt_offline = False
+        self.soc_alert_date = ""         # retained in dacha_bridge/tuya_soc_alert
+        self.soc_bad_since = 0.0
+        self.soc_alerted = False
+        self.board_soc_changed = 0.0     # last time the board's SOC changed
+        # ballast: counters retained in dacha_bridge/ballast, the rest is runtime
+        self.ballast_loaded = False
+        self.bl = {"season": "", "season_s": 0.0, "season_wh": 0.0, "date": "",
+                   "today_s": 0.0, "today_wh": 0.0, "starts": 0}
+        self.bl_owned = False        # we switched it on (a manual "on" is left alone)
+        self.bl_on = False           # plug state as last read
+        self.bl_power = 0.0
+        self.bl_changed = 0.0        # last on/off by us
+        self.bl_ok_since = 0.0
+        self.bl_drain_since = 0.0
+        self.bl_backoff_until = 0.0
+        self.bl_fails = 0
+        self.bl_chargers_kw = None
+        self.bl_reason = "старт"
+        self.bl_last_off = ""
+        # electricity: meter readings -> HA; HA's monthly report -> Telegram
+        self.meter_sent: dict = {}
+        self.meter_sent_at = 0.0
+        self.el_report: dict = {}
+        self.el_report_tg_id = ""
         self.cmd_lock = threading.Lock()
         self.last_cmd_ts = 0
         self.mq = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="dacha-bridge")
@@ -411,7 +478,9 @@ class Bridge:
     def on_connect(self, c, userdata, flags, rc, props=None):
         log.info("mqtt connected rc=%s", rc)
         subs = ["dacha_relays/state", "dacha_relays/alert", "dacha_relays/sa/#",
-                "dacha_bridge/tg_chat", "dacha_bridge/msb_baseline", "homeassistant/status"]
+                "dacha_bridge/tg_chat", "dacha_bridge/msb_baseline", "dacha_bridge/tuya_soc_alert",
+                "dacha_bridge/ballast", "dacha_bridge/electricity_report", "dacha_bridge/electricity_report_tg",
+                "homeassistant/status"]
         for m in self.msbs:
             subs += [f"{m.serial}/config", f"{m.serial}/control/#", f"{m.serial}/host/#"]
         for t in subs:
@@ -425,12 +494,30 @@ class Bridge:
             if t == "dacha_relays/state":
                 if not self.board_state:
                     log.info("first board state received")
-                self.board_state = json.loads(msg.payload)
+                st = json.loads(msg.payload)
+                if self.board_state and st.get("soc") != self.board_state.get("soc"):
+                    self.board_soc_changed = time.time()
+                self.board_state = st
                 self.board_last = time.time()
             elif t == "dacha_relays/alert":
                 self.on_alert(json.loads(msg.payload))
             elif t.startswith("dacha_relays/sa/"):
                 self.sa_values[t.rsplit("/", 1)[1]] = msg.payload.decode().strip()
+                self.sa_last = time.time()
+            elif t == "dacha_bridge/ballast":
+                if not self.ballast_loaded:   # only the retained copy at start
+                    self.ballast_loaded = True
+                    d = json.loads(msg.payload or b"{}")
+                    for k in ("season", "season_s", "season_wh", "date", "today_s", "today_wh", "starts"):
+                        if k in d:
+                            self.bl[k] = d[k]
+                    self.bl_owned = bool(d.get("owned"))   # survive a pod restart while it runs
+            elif t == "dacha_bridge/electricity_report":
+                self.el_report = json.loads(msg.payload or b"{}")
+            elif t == "dacha_bridge/electricity_report_tg":
+                self.el_report_tg_id = msg.payload.decode().strip()
+            elif t == "dacha_bridge/tuya_soc_alert":
+                self.soc_alert_date = msg.payload.decode().strip()
             elif t == "dacha_bridge/tg_chat":
                 self.tg_chat = msg.payload.decode().strip()
             elif t == "dacha_bridge/msb_baseline":
@@ -623,10 +710,70 @@ class Bridge:
                     self.sa_sent[code] = v
                     log.info("tuya virtual MUST: %s=%s", code, v)
 
+    def check_tuya_soc(self):
+        """Tuya virtual device SOC vs the board's SOC (what HA gets over MQTT).
+
+        Alerts through dacha_relays/alert (HA push + our own Telegram path),
+        daytime only and once a day; a 'resolved' follows when it clears.
+        """
+        s = self.board_state
+        if not (TUYA_VIRTUAL_ID and s.get("soc_fresh") and isinstance(s.get("soc"), (int, float))
+                and time.time() - self.board_last < BOARD_SILENT_S):
+            return   # no trustworthy reference: the board raises its own alarms
+        sh = self.tuya.shadow(TUYA_VIRTUAL_ID, "battery_percentage")
+        now = time.time()
+        if sh is None:
+            reason = "Tuya Cloud не віддає SOC віртуального пристрою"
+            tuya_soc, tuya_t = None, 0
+        else:
+            tuya_soc, tuya_t = sh
+            board = s["soc"]
+            if abs(float(tuya_soc) - float(board)) >= TUYA_SOC_DIFF:
+                reason = f"у Tuya {tuya_soc}%, а плата (і HA) показує {board}%"
+            elif (now - tuya_t > TUYA_SOC_STALE_S and self.board_soc_changed > tuya_t + 600):
+                reason = (f"у Tuya SOC {tuya_soc}% не оновлювався {int((now - tuya_t) / 3600)} год, "
+                          f"хоча на платі він змінювався")
+            else:
+                reason = ""
+        if not reason:
+            if self.soc_alerted:
+                self.publish_alert("resolved", "SOC у Tuya знову збігається з платою",
+                                   f"Tuya {tuya_soc}%, плата {s['soc']}%.")
+            self.soc_bad_since, self.soc_alerted = 0.0, False
+            return
+        if not self.soc_bad_since:
+            self.soc_bad_since = now
+            log.warning("tuya soc mismatch: %s", reason)
+        today = datetime.now(TZ).strftime("%Y-%m-%d")
+        h = datetime.now(TZ).hour
+        if (now - self.soc_bad_since >= TUYA_SOC_GRACE_S and not self.soc_alerted
+                and TUYA_SOC_ALERT_HOURS[0] <= h < TUYA_SOC_ALERT_HOURS[1]
+                and self.soc_alert_date != today):
+            self.publish_alert("warning", "⚠️ SOC у Tuya не відповідає реальному",
+                               f"Solar Assistant Integration: {reason}. Сценарії Tuya (підлога, бойлер, "
+                               f"кондиціонер) працюють на неправильному SOC. Перевір лог dacha-bridge "
+                               f"(передача SA → Tuya).")
+            self.soc_alerted = True
+            self.soc_alert_date = today
+            self.mq.publish("dacha_bridge/tuya_soc_alert", today, qos=1, retain=True)
+
+    def publish_alert(self, level: str, title: str, text: str):
+        """Same path as the board's alerts: HA pushes it, on_alert() sends Telegram."""
+        self.mq.publish("dacha_relays/alert", json.dumps(
+            {"key": "tuya_soc", "level": level, "title": title, "text": text}, ensure_ascii=False), qos=1)
+        log.info("alert %s: %s", level, title)
+
     def loop_watch(self):
         ha_fails = 0
+        last_soc_check = 0.0
         time.sleep(120)   # let the first board state arrive
         while True:
+            if time.time() - last_soc_check >= TUYA_SOC_CHECK_S:
+                last_soc_check = time.time()
+                try:
+                    self.check_tuya_soc()
+                except Exception:
+                    log.exception("tuya soc check")
             silent = self.board_last and time.time() - self.board_last > BOARD_SILENT_S
             self.watch_alarm("board_silent", bool(silent or not self.board_last),
                              "плата в сараї мовчить",
@@ -646,13 +793,204 @@ class Bridge:
                              "Telegram працює.")
             time.sleep(60)
 
+    # --- solar ballast (Masha's heater) ---------------------------------------
+    def ballast_discovery(self):
+        dev = {"identifiers": ["dacha_bridge"], "name": "Dacha bridge", "manufacturer": "dacha", "model": FIRMWARE}
+        st = "dacha_bridge/ballast"
+        ents = {
+            ("binary_sensor", "dacha_ballast_active"): {"name": "Баласт (обігрівач Маші) активний",
+                "value_template": "{{ 'ON' if value_json.active else 'OFF' }}", "icon": "mdi:radiator"},
+            ("sensor", "dacha_ballast_season_hours"): {"name": "Баласт: годин за сезон",
+                "value_template": "{{ (value_json.season_s / 3600) | round(2) }}", "unit_of_measurement": "h",
+                "device_class": "duration", "state_class": "total_increasing"},
+            ("sensor", "dacha_ballast_season_energy"): {"name": "Баласт: енергія за сезон",
+                "value_template": "{{ (value_json.season_wh / 1000) | round(3) }}", "unit_of_measurement": "kWh",
+                "device_class": "energy", "state_class": "total_increasing"},
+            ("sensor", "dacha_ballast_today_minutes"): {"name": "Баласт: хвилин сьогодні",
+                "value_template": "{{ (value_json.today_s / 60) | round(0) }}", "unit_of_measurement": "min",
+                "device_class": "duration", "state_class": "total_increasing"},
+            ("sensor", "dacha_ballast_reason"): {"name": "Баласт: стан",
+                "value_template": "{{ value_json.reason }}", "icon": "mdi:information-outline"},
+        }
+        for (comp, uid), cfg in ents.items():
+            cfg.update({"unique_id": uid, "object_id": uid, "state_topic": st, "device": dev})
+            self.mq.publish(f"homeassistant/{comp}/{uid}/config", json.dumps(cfg, ensure_ascii=False), qos=1, retain=True)
+
+    @staticmethod
+    def ballast_season_label(d: datetime) -> str:
+        return f"{d.year}-{d.year + 1}" if d.month >= 7 else f"{d.year - 1}-{d.year}"
+
+    @staticmethod
+    def ballast_in_season(d: datetime) -> bool:
+        (m1, d1), (m2, d2) = BALLAST_SEASON
+        return (d.month, d.day) >= (m1, d1) or (d.month, d.day) < (m2, d2)
+
+    def ballast_switch(self, on: bool, reason: str, now: float) -> bool:
+        if not self.tuya.command(BALLAST_ID, "switch_1", on):
+            log.warning("ballast: switch %s failed", on)
+            return False
+        self.bl_on, self.bl_owned, self.bl_changed, self.bl_reason = on, on, now, reason
+        self.bl_ok_since = self.bl_drain_since = 0.0
+        if not on:
+            self.bl_last_off = reason
+        if on:
+            self.bl["starts"] = self.bl.get("starts", 0) + 1
+        log.info("ballast %s: %s", "ON" if on else "OFF", reason)
+        return True
+
+    def ballast_tick(self, now: float, dt: float, read_devices: bool):
+        loc = datetime.now(TZ)
+        today, season = loc.strftime("%Y-%m-%d"), self.ballast_season_label(loc)
+        if self.bl.get("season") != season:
+            self.bl.update(season=season, season_s=0.0, season_wh=0.0, starts=0)
+        if self.bl.get("date") != today:
+            self.bl.update(date=today, today_s=0.0, today_wh=0.0)
+            self.bl_fails, self.bl_backoff_until = 0, 0.0
+
+        if read_devices:
+            st = self.tuya.status(BALLAST_ID)
+            if st is not None:
+                d = {x["code"]: x["value"] for x in st}
+                was_on, self.bl_on = self.bl_on, bool(d.get("switch_1"))
+                self.bl_power = float(d.get("cur_power") or 0) / 10
+                if self.bl_owned and not self.bl_on:
+                    # someone else switched it off (user, or the grid-lost scene)
+                    self.bl_owned, self.bl_changed = False, now
+                    self.bl_backoff_until = now + 3600
+                    self.bl_reason = "вимкнули ззовні — пауза 1 год"
+                    log.info("ballast: switched off externally (was_on=%s)", was_on)
+            m = self.tuya.status(METER_ID)
+            if m is not None:
+                p = {x["code"]: x["value"] for x in m}
+                self.publish_meter(p)
+                try:
+                    self.bl_chargers_kw = sum(float(json.loads(p[k])["power"]) for k in ("phase_a", "phase_b"))
+                except Exception:
+                    self.bl_chargers_kw = None
+
+        if self.bl_owned and self.bl_on:
+            if self.bl_power > 50:   # the heater's own thermostat cycles it; count heating time only
+                self.bl["today_s"] += dt; self.bl["season_s"] += dt
+            wh = self.bl_power * dt / 3600
+            self.bl["today_wh"] += wh; self.bl["season_wh"] += wh
+
+        try:
+            soc = float(self.sa_values["battery_percentage"])
+            bat = float(self.sa_values["battery_load"])
+            pv = float(self.sa_values["pv_power"])
+            sa_ok = now - self.sa_last < 5 * 60
+        except (KeyError, ValueError):
+            soc = bat = pv = 0.0
+            sa_ok = False
+        window = self.ballast_in_season(loc) and BALLAST_HOURS[0] <= loc.hour < BALLAST_HOURS[1]
+        chargers = self.bl_chargers_kw
+
+        if self.bl_owned:
+            self.bl_drain_since = (self.bl_drain_since or now) if bat < BALLAST_BAT_DRAIN else 0.0
+            off = ""
+            if not window:
+                off = "поза вікном"
+            elif not sa_ok:
+                off = "немає даних Solar Assistant"
+            elif soc <= BALLAST_SOC_OFF:
+                off = f"SOC {soc:.0f}%"
+            elif chargers is not None and chargers > 3 * BALLAST_CHARGERS_KW:
+                off = f"увімкнулись Cherokee ({chargers:.2f} кВт)"
+            elif self.bl_drain_since and now - self.bl_drain_since >= BALLAST_DRAIN_S:
+                off = f"сонця не вистачає (батарея {bat:.0f} Вт)"
+            ran = now - self.bl_changed
+            if off and self.ballast_switch(False, f"вимкнено {datetime.now(TZ):%H:%M}: {off}", now) and (off.startswith("сонця") or off.startswith("SOC")):
+                if ran < 20 * 60:   # the sun couldn't carry it: wait longer each time today
+                    self.bl_fails += 1
+                    pause = BALLAST_BACKOFF_S[min(self.bl_fails, len(BALLAST_BACKOFF_S)) - 1]
+                    self.bl_backoff_until = now + pause
+                    self.bl_reason = f"{off} — пауза {pause // 60} хв"
+                else:
+                    self.bl_fails = 0
+        elif not self.bl_on:
+            ok = (window and sa_ok and soc >= BALLAST_SOC_ON and bat >= BALLAST_BAT_OK and pv >= BALLAST_PV_MIN
+                  and chargers is not None and chargers < BALLAST_CHARGERS_KW)
+            self.bl_ok_since = (self.bl_ok_since or now) if ok else 0.0
+            if (ok and now - self.bl_ok_since >= BALLAST_ON_DELAY_S and now - self.bl_changed >= BALLAST_MIN_OFF_S
+                    and now >= self.bl_backoff_until):
+                self.ballast_switch(True, f"надлишок сонця: PV {pv:.0f} Вт, SOC {soc:.0f}%", now)
+            elif now >= self.bl_backoff_until and not window:
+                self.bl_reason = "поза вікном (сезон, 09–16)"
+            elif now >= self.bl_backoff_until and not ok:
+                self.bl_reason = "чекаю надлишку" + (f" · {self.bl_last_off}" if self.bl_last_off else "")
+        else:
+            self.bl_reason = "увімкнено вручну — не чіпаю"
+
+    # --- electricity meter readings + monthly report -------------------------
+    def meter_discovery(self):
+        dev = {"identifiers": ["dacha_bridge"], "name": "Dacha bridge", "manufacturer": "dacha", "model": FIRMWARE}
+        for key, name in (("t1", "Лічильник T1 (день)"), ("t2", "Лічильник T2 (ніч)"), ("total", "Лічильник всього")):
+            uid = f"dacha_meter_{key}"
+            cfg = {"name": name, "unique_id": uid, "default_entity_id": f"sensor.{uid}",
+                   "state_topic": "dacha_bridge/meter", "value_template": f"{{{{ value_json.{key} }}}}",
+                   "unit_of_measurement": "kWh", "device_class": "energy", "state_class": "total_increasing",
+                   "suggested_display_precision": 2, "device": dev}
+            self.mq.publish(f"homeassistant/sensor/{uid}/config", json.dumps(cfg, ensure_ascii=False), qos=1, retain=True)
+
+    def publish_meter(self, p: dict):
+        """Tariff registers of the 3-phase meter (Tuya, scale 2) -> dacha_bridge/meter."""
+        try:
+            v = {"t1": p["forward_energy_t1"] / 100, "t2": p["forward_energy_t2"] / 100,
+                 "total": p["forward_energy_total"] / 100}
+        except (KeyError, TypeError):
+            return
+        if v != self.meter_sent or time.time() - self.meter_sent_at > 1800:
+            v["time"] = datetime.now(TZ).isoformat(timespec="seconds")
+            self.mq.publish("dacha_bridge/meter", json.dumps(v), qos=1, retain=True)
+            self.meter_sent, self.meter_sent_at = {k: v[k] for k in ("t1", "t2", "total")}, time.time()
+
+    def send_el_report(self):
+        """HA publishes the monthly report (retained); send it to Telegram once."""
+        r = self.el_report
+        rid = str(r.get("id") or "")
+        if not rid or rid == self.el_report_tg_id or not TG_TOKEN or not self.tg_chat:
+            return
+        j = self.tg.call("sendMessage", chat_id=self.tg_chat, text=r.get("text", ""))
+        if j and j.get("ok"):
+            self.el_report_tg_id = rid
+            self.mq.publish("dacha_bridge/electricity_report_tg", rid, qos=1, retain=True)
+            log.info("electricity report %s sent to telegram", rid)
+
+    def loop_ballast(self):
+        time.sleep(30)   # retained counters first
+        self.ballast_loaded = True
+        self.ballast_discovery()
+        self.meter_discovery()
+        last, last_read, last_pub = time.time(), 0.0, 0.0
+        while True:
+            now = time.time()
+            dt, last = min(now - last, 180), now
+            try:
+                read = now - last_read >= 60
+                if read:
+                    last_read = now
+                on_before = self.bl_owned
+                self.ballast_tick(now, dt, read)
+                if now - last_pub >= 60 or on_before != self.bl_owned:
+                    last_pub = now
+                    out = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in self.bl.items() if not k.startswith("_")}
+                    out.update(owned=self.bl_owned, active=self.bl_owned and self.bl_on, power=self.bl_power, reason=self.bl_reason)
+                    self.mq.publish("dacha_bridge/ballast", json.dumps(out, ensure_ascii=False), qos=1, retain=True)
+            except Exception:
+                log.exception("ballast")
+            try:
+                self.send_el_report()
+            except Exception:
+                log.exception("electricity report")
+            time.sleep(30)
+
     def run(self):
         log.info("starting: %d MPPT, virtual=%s, telegram=%s", len(self.msbs),
                  bool(TUYA_VIRTUAL_ID), bool(TG_TOKEN))
         self.mq.connect_async(MQTT_HOST, MQTT_PORT, keepalive=30)
         self.mq.loop_start()
         time.sleep(3)   # retained chat / baselines first
-        for target in (self.loop_mppt, self.loop_publish, self.loop_sa, self.loop_watch):
+        for target in (self.loop_mppt, self.loop_publish, self.loop_sa, self.loop_watch, self.loop_ballast):
             threading.Thread(target=target, daemon=True).start()
         if HA_CMD_TOKEN:
             srv = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), make_http_handler(self))

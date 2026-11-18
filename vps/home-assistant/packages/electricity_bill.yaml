@@ -1,0 +1,256 @@
+# Monthly electricity report for the cooperative chairman.
+#
+# Readings: sensor.dacha_meter_t1 / _t2 (dacha-bridge reads the meter's tariff
+# registers from Tuya). On the 22nd at 10:00 (or by the dashboard button)
+# script.electricity_report builds the report from the previous reported values
+# and the tariffs, then:
+#   - one push to the phone,
+#   - retained MQTT dacha_bridge/electricity_report -> dacha-bridge sends it to
+#     Telegram, the host mailer (tuya_electricity/send_report_email.py) e-mails it,
+#   - the current values become "previous" for next month (commit: true).
+# Settings are helpers below; their defaults are filled once, on first start.
+
+input_number:
+  el_tariff_t1:
+    name: "Тариф T1 (день)"
+    unit_of_measurement: "грн/кВт·год"
+    min: 0
+    max: 50
+    step: 0.01
+    mode: box
+    icon: mdi:weather-sunny
+  el_tariff_t2:
+    name: "Тариф T2 (ніч)"
+    unit_of_measurement: "грн/кВт·год"
+    min: 0
+    max: 50
+    step: 0.01
+    mode: box
+    icon: mdi:weather-night
+  el_prev_t1:
+    name: "Попередні T1 (у звіті)"
+    unit_of_measurement: "kWh"
+    min: 0
+    max: 999999
+    step: 1
+    mode: box
+    icon: mdi:counter
+  el_prev_t2:
+    name: "Попередні T2 (у звіті)"
+    unit_of_measurement: "kWh"
+    min: 0
+    max: 999999
+    step: 1
+    mode: box
+    icon: mdi:counter
+
+input_text:
+  el_plot:
+    name: "Ділянка"
+    max: 20
+    icon: mdi:home-map-marker
+  el_owner:
+    name: "П І Б"
+    max: 100
+    icon: mdi:account
+  el_membership:
+    name: "Рядок про членські внески"
+    max: 200
+    icon: mdi:cash-check
+  el_paid_to:
+    name: "Електрика сплачена на"
+    max: 100
+    icon: mdi:bank
+  el_last_report:
+    name: "Останній звіт"
+    max: 100
+    icon: mdi:file-document-check
+
+template:
+  - sensor:
+      - name: "Звіт за електрику (перегляд)"
+        unique_id: el_report_preview
+        icon: mdi:file-document-outline
+        unit_of_measurement: "грн"
+        state: >
+          {% set c1 = states('sensor.dacha_meter_t1') | float(0) | round(0) | int %}
+          {% set c2 = states('sensor.dacha_meter_t2') | float(0) | round(0) | int %}
+          {% set d1 = c1 - states('input_number.el_prev_t1') | int(0) %}
+          {% set d2 = c2 - states('input_number.el_prev_t2') | int(0) %}
+          {{ (d1 * states('input_number.el_tariff_t1') | float(0)) | round(0) | int
+             + (d2 * states('input_number.el_tariff_t2') | float(0)) | round(0) | int }}
+        availability: >
+          {{ has_value('sensor.dacha_meter_t1') and has_value('sensor.dacha_meter_t2') }}
+
+script:
+  electricity_report:
+    alias: "Звіт за електрику"
+    icon: mdi:file-send
+    mode: single
+    fields:
+      commit:
+        name: "Запам'ятати як попередні"
+        description: "Після відправки поточні показники стають попередніми для наступного звіту"
+        default: true
+        selector:
+          boolean:
+    variables:
+      ok: "{{ has_value('sensor.dacha_meter_t1') and has_value('sensor.dacha_meter_t2') }}"
+      c1: "{{ states('sensor.dacha_meter_t1') | float(0) | round(0) | int }}"
+      c2: "{{ states('sensor.dacha_meter_t2') | float(0) | round(0) | int }}"
+      p1: "{{ states('input_number.el_prev_t1') | int(0) }}"
+      p2: "{{ states('input_number.el_prev_t2') | int(0) }}"
+      r1: "{{ states('input_number.el_tariff_t1') | float(0) }}"
+      r2: "{{ states('input_number.el_tariff_t2') | float(0) }}"
+      d1: "{{ c1 - p1 }}"
+      d2: "{{ c2 - p2 }}"
+      s1: "{{ (d1 * r1) | round(0) | int }}"
+      s2: "{{ (d2 * r2) | round(0) | int }}"
+      month: >
+        {{ ['січень','лютий','березень','квітень','травень','червень','липень','серпень',
+            'вересень','жовтень','листопад','грудень'][now().month - 1] }} {{ now().year }}
+      report: |-
+        Ділянка: {{ states('input_text.el_plot') }}.
+
+        П І Б: {{ states('input_text.el_owner') }}
+        Т1 — день
+        Т2 — ніч
+        Попередні Т1: {{ p1 }}
+        Поточні Т1: {{ c1 }}
+        Різниця Т1: {{ d1 }}
+        грн х 1кВтг {{ '%g' | format(r1) }}
+        Всього Т1: грн {{ s1 }}
+
+        Попередні Т2: {{ p2 }}
+        Поточні Т2: {{ c2 }}
+        Різниця Т2: {{ d2 }}
+        грн х 1кВтг {{ '%g' | format(r2) }}
+        Всього Т2: грн. {{ s2 }}
+
+        Разом Т1+Т2= {{ s1 + s2 }}
+
+        {{ states('input_text.el_membership') }}
+
+        Електрика сплачена на
+        "{{ states('input_text.el_paid_to') }}"
+      raw: |-
+        Показники лічильника на {{ now().strftime('%d.%m.%Y %H:%M') }}:
+          T1 (денний): {{ '%.2f' | format(states('sensor.dacha_meter_t1') | float(0)) }} кВт·год
+          T2 (нічний): {{ '%.2f' | format(states('sensor.dacha_meter_t2') | float(0)) }} кВт·год
+          Всього:      {{ '%.2f' | format(states('sensor.dacha_meter_total') | float(0)) }} кВт·год
+    sequence:
+      - if: "{{ not ok }}"
+        then:
+          - action: notify.mobile_app_sm_f761b
+            data:
+              title: "⚠️ Звіт за електрику не сформовано"
+              message: "Немає показників лічильника (sensor.dacha_meter_t1/t2). Перевір dacha-bridge."
+          - stop: "no meter readings"
+      - action: notify.mobile_app_sm_f761b
+        data:
+          title: "Звіт за електрику: {{ s1 + s2 }} грн"
+          message: "{{ report }}"
+          data:
+            tag: electricity_report
+      - action: mqtt.publish
+        data:
+          topic: dacha_bridge/electricity_report
+          retain: true
+          qos: 1
+          payload: >
+            {{ {'id': now().isoformat(timespec='seconds'),
+                'subject': '[Лічильник] Звіт за ' ~ month ~ ': ' ~ (s1 + s2) ~ ' грн',
+                'text': report ~ '\n\n---\n' ~ raw,
+                'report': report} | to_json }}
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.el_last_report
+        data:
+          value: "{{ now().strftime('%d.%m.%Y %H:%M') }}: Т1 {{ d1 }} + Т2 {{ d2 }} кВт·год = {{ s1 + s2 }} грн"
+      - if: "{{ commit }}"
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.el_prev_t1
+            data:
+              value: "{{ c1 }}"
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.el_prev_t2
+            data:
+              value: "{{ c2 }}"
+
+automation:
+  - id: electricity_report_monthly
+    alias: "Звіт за електрику: 22-го о 10:00"
+    triggers:
+      - trigger: time
+        at: "10:00:00"
+    conditions:
+      - condition: template
+        value_template: "{{ now().day == 22 }}"
+    actions:
+      - action: script.electricity_report
+        data:
+          commit: true
+
+  # test / remote trigger: MQTT dacha_bridge/el_report_cmd, payload "preview"
+  # (sends the report everywhere but does not move the "previous" values)
+  - id: electricity_report_mqtt
+    alias: "Звіт за електрику: за командою MQTT (без збереження)"
+    triggers:
+      - trigger: mqtt
+        topic: dacha_bridge/el_report_cmd
+        payload: preview
+    actions:
+      - action: script.electricity_report
+        data:
+          commit: false
+
+  - id: electricity_report_defaults
+    alias: "Звіт за електрику: початкові налаштування"
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - delay: "00:00:20"
+      - if: "{{ states('input_number.el_tariff_t1') | float(0) == 0 }}"
+        then:
+          - action: input_number.set_value
+            target: { entity_id: input_number.el_tariff_t1 }
+            data: { value: 4.45 }
+      - if: "{{ states('input_number.el_tariff_t2') | float(0) == 0 }}"
+        then:
+          - action: input_number.set_value
+            target: { entity_id: input_number.el_tariff_t2 }
+            data: { value: 2.2 }
+      - if: "{{ states('input_number.el_prev_t1') | float(0) == 0 }}"
+        then:
+          - action: input_number.set_value
+            target: { entity_id: input_number.el_prev_t1 }
+            data: { value: 3746 }
+      - if: "{{ states('input_number.el_prev_t2') | float(0) == 0 }}"
+        then:
+          - action: input_number.set_value
+            target: { entity_id: input_number.el_prev_t2 }
+            data: { value: 4367 }
+      - if: "{{ states('input_text.el_plot') in ['', 'unknown'] }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.el_plot }
+            data: { value: "81" }
+      - if: "{{ states('input_text.el_owner') in ['', 'unknown'] }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.el_owner }
+            data: { value: "Колесниченко" }
+      - if: "{{ states('input_text.el_membership') in ['', 'unknown'] }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.el_membership }
+            data: { value: "Членскі внески за 2026.: 400грн сплачені" }
+      - if: "{{ states('input_text.el_paid_to') in ['', 'unknown'] }}"
+        then:
+          - action: input_text.set_value
+            target: { entity_id: input_text.el_paid_to }
+            data: { value: "UA613077700000026004411251028" }
