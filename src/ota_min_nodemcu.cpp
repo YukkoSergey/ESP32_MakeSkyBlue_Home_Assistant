@@ -37,9 +37,16 @@ static void connectStrongest() {
 }
 
 void setup() {
-    // Active-LOW relays: HIGH = released. First thing, before anything else.
-    digitalWrite(5, HIGH); pinMode(5, OUTPUT);   // D1 heavy load
-    digitalWrite(4, HIGH); pinMode(4, OUTPUT);   // D2 generator
+    // Relays released first thing, before anything else. env:nodemcu (and so
+    // this image) builds with RELAY_ACTIVE_HIGH=1: there LOW = released, and
+    // the old HIGH closed both relays — generator started — while flashed.
+#if defined(RELAY_ACTIVE_HIGH) && RELAY_ACTIVE_HIGH
+    const uint8_t kReleased = LOW;
+#else
+    const uint8_t kReleased = HIGH;
+#endif
+    digitalWrite(5, kReleased); pinMode(5, OUTPUT);   // D1 heavy load
+    digitalWrite(4, kReleased); pinMode(4, OUTPUT);   // D2 generator
     Serial.begin(115200);
     Serial.println("\n[Boot] NodeMCU OTA bootstrap");
     connectStrongest();
