@@ -355,6 +355,8 @@ void setup() {
     // Relays first: restore their state before anything slow happens.
     relays.begin(settings::load());
     alerts.begin(compatResetKind());
+    // "Прийняв" on the Cherokee lockout alarm (web, Telegram, HA) unlocks it.
+    alerts.setAckHook([](const char*, const char* by) { relays.cherokeeAck(by); });
 
     esp_task_wdt_init(kLoopWdtTimeoutS, true);
     esp_task_wdt_add(NULL);

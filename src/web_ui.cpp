@@ -47,10 +47,11 @@ pre{margin:0;height:340px;overflow:auto;background:var(--bg);border:1px solid va
  <div class="card"><h2>Батарея і реле</h2><div class="kv" id="st"></div>
   <div class="row" style="margin-top:10px"><span class="mute">Важке навантаження:</span>
    <button data-h="auto">Авто</button><button data-h="on">Дозволити</button><button data-h="off">Заборонити</button>
-  </div><div class="mute" style="margin-top:6px">«Дозволити» обходить пороги, але аварія за напругою і робота генератора все одно вимикають важке навантаження.</div>
-  <div class="row" style="margin-top:10px"><span class="mute">Реле 3 (D6):</span> <span id="aux1"></span>
-   <button data-a="on">Увімкнути</button><button data-a="off">Вимкнути</button>
-  </div><div class="mute" style="margin-top:6px">Лише вручну. Після перезавантаження плати — вимкнене.</div></div>
+  </div><div class="mute" style="margin-top:6px">«Дозволити» обходить пороги, але аварія за напругою і робота генератора все одно вимикають важке навантаження.</div></div>
+ <div class="card"><h2>Зарядники Cherokee</h2><div class="kv" id="ch"></div>
+  <div class="row" style="margin-top:10px">
+   <button data-c="auto">Авто</button><button data-c="on">Увімкнути</button><button data-c="off">Заборонити</button>
+  </div><div class="mute" style="margin-top:6px">Ручні режими не обходять захист: аварійне вимкнення і стеля комірки вимикають навіть «Увімкнути»; аварія за напругою і підлога SOC вмикають навіть «Заборонити».</div></div>
  <div class="card"><h2>Генератор</h2><div class="kv" id="gen"></div>
   <div class="row" style="margin-top:10px">
    <button data-m="auto">Авто</button><button data-m="run">Запустити до мети</button><button data-m="off">Заборонити</button>
@@ -65,6 +66,13 @@ pre{margin:0;height:340px;overflow:auto;background:var(--bg);border:1px solid va
  <div class="scroll"><table><thead><tr><th>Сезон</th><th>Важке ВВІМК &gt;</th><th>Важке ВИМК &lt;</th><th>Генератор авто</th><th>Генератор СТАРТ &lt;</th><th>Генератор СТОП &gt;</th></tr></thead><tbody id="prof"></tbody></table></div>
  <div class="mute" style="margin:6px 0">Усі пороги — запас енергії в кВт·год (SOC × ємність). Авто-сезони: зима 1.12–28.02, міжсезоння 1.03–30.04 і 15.10–30.11, літо 1.05–14.10.</div>
  <div class="row"><button class="pri" id="save">Зберегти</button><span id="msg"></span></div>
+ <h3 class="sub" style="margin-top:16px">Зарядники Cherokee (SOC, %)</h3>
+ <div class="scroll"><table><thead><tr><th>Сезон</th><th>ВВІМК, якщо SOC &lt;</th><th>ВИМК, якщо SOC ≥</th><th>Підлога (0 = немає)</th><th>Ціль до заходу (0 = немає)</th></tr></thead><tbody id="chprof"></tbody></table></div>
+ <div class="row" style="margin:8px 0">
+  <label>Міжсезоння, якщо HA каже «сонця не вистачить»: ВВІМК &lt; <input type="number" step="1" id="chadv"> %</label>
+  <label>Стеля комірки <input type="number" step="0.01" id="chcap"> В (0 = вимкнено)</label>
+ </div>
+ <div class="row"><button class="pri" id="chsave">Зберегти Cherokee</button><span id="chmsg"></span></div>
 </div>
 <div class="card" style="margin-top:12px"><h2>Сповіщення</h2>
  <h3 class="sub">Telegram</h3>
@@ -178,8 +186,8 @@ async function status(){
    ['До мети',r.gen_eta_h<0?'—':'~'+r.gen_eta_h+' год']]);
   document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('sel',b.dataset.m==r.gen_mode));
   document.querySelectorAll('[data-h]').forEach(b=>b.classList.toggle('sel',b.dataset.h==r.heavy_mode));
-  document.querySelectorAll('[data-a]').forEach(b=>b.classList.toggle('sel',b.dataset.a==r.aux1));
-  $('aux1').innerHTML=onoff(r.aux1=='on','ЗАМКНУТЕ','розімкнуте');
+  document.querySelectorAll('[data-c]').forEach(b=>b.classList.toggle('sel',b.dataset.c==r.cherokee_mode));
+  renderCh(r);
   if($('fbOn'))$('fbOn').onclick=async()=>{if(confirm('Увімкнути зворотний зв\'язок від генератора? Контакт контактора генератора має бути підключений між D5 і G.')){await api('/api/gen_feedback',{method:'POST',body:'on'});status()}};
   lastStatus=j;renderAlarms(j.alerts);renderWhy(r);renderHow();
   kv($('sys'),[
@@ -195,6 +203,24 @@ async function log(){
  try{const r=await api('/api/log?since='+logPos);logPos=+r.headers.get('X-Log-Pos');const t=await r.text();
   if(t){const el=$('log');el.textContent+=t;if(el.textContent.length>200000)el.textContent=el.textContent.slice(-150000);if($('follow').checked)el.scrollTop=el.scrollHeight}}catch(e){}
 }
+async function loadCh(){
+ const j=await (await api('/api/cherokee_settings')).json();lastCh=j;renderHow();$('chadv').value=j.advice_on;$('chcap').value=j.cell_cap;
+ $('chprof').innerHTML=j.profiles.map((p,i)=>`<tr><td>${['літо','міжсезоння','зима'][i]}</td>${['on','off','floor','sunset'].map(k=>`<td><input type="number" step="1" data-k="${k}" value="${p[k]}"></td>`).join('')}</tr>`).join('');
+}
+function renderCh(r){
+ const th=r.ch_th||{},hold=r.cherokee_hold_s>0?` <span class="warn">(хоче ${r.cherokee=='on'?'вимкнути':'увімкнути'}, мінімальний час ще ${Math.ceil(r.cherokee_hold_s/60)} хв)</span>`:'';
+ kv($('ch'),[
+  ['Зарядники',onoff(r.cherokee=='on','ПРАЦЮЮТЬ','вимкнені')+(r.cherokee=='on'&&r.grid_v>=0&&r.grid_v<100?' <span class="warn">(мережі немає, фізично стоять)</span>':'')+` · ${r.cherokee_min} хв`],
+  ['Причина',(CHR[r.cherokee_reason]||r.cherokee_reason)+hold],
+  ['Режим',{auto:'авто',on:'<span class="warn">увімкнено вручну</span>',off:'<span class="warn">заборонено вручну</span>'}[r.cherokee_mode]],
+  ['Пороги сезону',`ВВІМК &lt; ${th.on} % · ВИМК ≥ ${th.off} %`+(th.floor?` · підлога ${th.floor} %`:'')+(th.sunset?` · до заходу ${th.sunset} %`:'')],
+  ['Комірка макс / BMS',(r.cell_max_v>0?r.cell_max_v+' В':'—')+' / '+(r.bms_v>0?r.bms_v+' В':'—')+(th.cell_cap>0?` · стеля ${th.cell_cap} В`:' · стеля вимк')],
+  ['CCL / температура',(r.ccl_a>=0?r.ccl_a+' А':'<span class="mute">SA не публікує</span>')+' / '+(r.bat_temp>-99?r.bat_temp+' °C':'—')],
+  ['Інвертор дозарядить',(r.inv_can_charge?'<b class="on">так</b>':'ні')+(r.inv_check?' <span class="warn">(перевіряю струм)</span>':'')+` · ${r.ac_range}${r.ac_range_src=='ha'?' (з HA)':r.ac_range_src=='sa'?'':' <span class="warn">(діапазон невідомий)</span>'}, ${{utility:'Utility first',sbu:'SBU',solar:'Solar first','?':'пріоритет ?'}[r.out_prio]}, мережа ${r.grid_v<0?'—':r.grid_v+' В'}`],
+  ['Сонце',`дах ${r.pv_w<0?'—':r.pv_w+' Вт'} · DC-приплив ${r.ext_dc_w} Вт`+(r.sun_w>=0?` · сонце зараз ${r.sun_w} Вт`:'')+(r.day?` · день, до заходу ${r.to_sunset_min<0?'—':r.to_sunset_min+' хв'}`:' · не день')],
+  ['Захист',`перемикань за год ${r.cherokee_switches_1h}/6 · аварій за добу ${r.cherokee_trips_24h}/3`+(r.cherokee_lock?' · <b class="bad">БЛОКУВАННЯ</b>':'')+(r.cherokee_flap?' · <b class="bad">блок УВІМК</b>':'')+(r.cherokee_full?' · повна':'')+(r.apl_hold?' · APL-утримання':'')],
+  ['Підказка HA',r.hint_age_min<0?'<span class="mute">не було</span>':r.hint_age_min>=180?'<span class="mute">прострочена</span>':`${r.hint_age_min} хв тому · порада ${r.hint_advice} · надлишок ${r.hint_surplus?'так':'ні'}`+(r.hint_outage_min>=0?` · відключення через ${r.hint_outage_min} хв`:'')]]);
+}
 async function loadSettings(){
  const j=await (await api('/api/settings')).json();lastSettings=j;renderHow();$('cap').value=j.capacity_kwh;$('smode').value=j.season_mode;
  $('prof').innerHTML=j.profiles.map((p,i)=>`<tr data-i="${i}"><td>${['літо','міжсезоння','зима'][i]}</td>
@@ -204,7 +230,8 @@ async function loadSettings(){
   <td><input type="number" step="0.1" data-k="gen_start_kwh" value="${p.gen_start_kwh}"></td>
   <td><input type="number" step="0.1" data-k="gen_stop_kwh" value="${p.gen_stop_kwh}"></td></tr>`).join('');
 }
-let lastStatus=null,lastSettings=null;
+let lastStatus=null,lastSettings=null,lastCh=null;
+const CHR={boot:'старт плати (реле відпущене = зарядники працюють)',emerg_cell:'<b class="bad">АВАРІЯ</b>: комірка ≥ 3.65 В',emerg_bms_v:'<b class="bad">АВАРІЯ</b>: напруга BMS ≥ 54.5 В',emerg_ccl:'<b class="bad">АВАРІЯ</b>: BMS заборонила заряд (CCL 0) нижче 95 %',emerg_temp:'<b class="bad">АВАРІЯ</b>: температура батареї поза 2…45 °C',emerg_lock:'<b class="bad">блокування</b> після 3 аварій за добу, чекає «Прийняв»',emerg_lock_low_soc:'блокування, але SOC &lt; 20 % і все в нормі',volt_emerg:'аварія за напругою батареї (&lt; 47 В)',soc_floor:'SOC нижче підлоги сезону',manual_off:'заборонено вручну',manual_on:'увімкнено вручну',no_data:'немає свіжих даних SA',frozen:'SOC застиг',flap_lock:'часті перемикання: УВІМК на 1 год',cell_cap:'стеля комірки',full:'батарея повна (спрацювала стеля комірки)',soc_low:'SOC нижче порогу ВВІМК',apl_weak_grid:'SA пускає слабку мережу в будинок (APL, &lt; 170 В)',sunset:'до заходу ≤ 90 хв, а ціль ще не досягнута',outage_soon:'скоро відключення за графіком',ups_weak_grid:'UPS, мережа &lt; 170 В, сонця не вистачає',soc_high:'SOC досяг порогу ВИМК',sun:'є сонце: останні відсотки добере воно',inverter:'останні відсотки дозаряджає інвертор від мережі',float:'100 %, зарядники перейшли на підтримку',to_full:'інвертор не дозаряджає, сонця немає: до 100 %',charging:'заряджаємо до порогу ВИМК',inv_not_charging:'інвертор не дозаряджав (перевірка не пройдена)',inv_lost:'інвертор більше не може дозаряджати',sun_gone:'сонце зникло',idle:'чекаємо порогу ВВІМК'};
 const SN=['літо','міжсезоння','зима'];
 const kwh=v=>(+v).toFixed(1).replace(/\.0$/,'')+' кВт·год';
 function pct(v,cap){return cap>0?Math.round(v*100/cap)+' %':'?'}
@@ -249,6 +276,15 @@ function renderWhy(r){
  }else{
   lines.push(`<b>Генератор стоїть</b>. Запуститься автоматично, коли запас впаде нижче ${kwh(t.gen_start_kwh)} (${pct(t.gen_start_kwh,cap)}), зараз ${kwh(res)}.`);
  }
+ const chOn=r.cherokee=='on',th=r.ch_th||{};
+ let cl=`<b class="${chOn?'on':''}">Зарядники Cherokee ${chOn?'працюють':'вимкнені'}</b>: ${CHR[r.cherokee_reason]||r.cherokee_reason}.`;
+ if(r.cherokee_hold_s>0)cl+=` Логіка вже хоче їх ${chOn?'вимкнути':'увімкнути'}, але чекає мінімальний час (${chOn?'15 хв роботи':'10 хв паузи'}): ще ${Math.ceil(r.cherokee_hold_s/60)} хв.`;
+ else if(r.cherokee_mode=='auto'&&r.soc_fresh&&!r.soc_frozen&&!r.cherokee_emerg&&!r.cherokee_lock){
+  if(chOn)cl+=r.season=='winter'?` Вимкнуться на ${th.off} %, якщо є сонце або інвертор може дозарядити від мережі; інакше працюють до 100 % і до переходу на підтримку.`:` Вимкнуться на ${th.off} %.`;
+  else cl+=` Увімкнуться, коли SOC впаде нижче ${th.on} %`+(th.floor?` (підлога ${th.floor} %)`:'')+'.';
+ }
+ if(chOn&&r.grid_v>=0&&r.grid_v<100)cl+=' Мережі немає, тож фізично вони стоять: котушка контактора живиться від мережі.';
+ lines.push(cl);
  $('why').innerHTML=lines.map(l=>'<p>'+l+'</p>').join('');
 }
 function renderHow(){
@@ -259,12 +295,13 @@ function renderHow(){
   <td>${p.gen_auto?kwh(p.gen_start_kwh)+' ('+pct(p.gen_start_kwh,cap)+')':'вимкнено'}</td><td>${kwh(p.gen_stop_kwh)} (${pct(p.gen_stop_kwh,cap)})</td></tr>`).join('');
  $('how').innerHTML=`
 <h3>Що робить плата</h3>
-<ul><li><b>Керує двома реле</b> за запасом енергії в батареї: дозвіл важкого навантаження і генератор. Це головна задача, і вона не залежить від інтернету.</li>
+<ul><li><b>Керує трьома реле</b>: дозвіл важкого навантаження і генератор (за запасом енергії в батареї), зарядники Cherokee (за SOC, сонцем і станом мережі). Це головна задача, і вона не залежить від інтернету.</li>
 <li>Пересилає дані трьох контролерів MakeSkyBlue MPPT (з Tuya Cloud) у Home Assistant для картки Solar_Manager.</li>
 <li>Пересилає показники Solar Assistant у віртуальний пристрій Tuya (MUST), щоб їх було видно в SmartLife.</li></ul>
 <h3>Підключення</h3>
 <ul><li><b>${r.pin_heavy} → реле 1 (IN1)</b>: живить БЖ 24 В. Від нього сигнальна лінія йде до контактора в будинку. Є напруга, отже важке навантаження (бойлер, тепла підлога, кондиціонер / тепловий насос) може працювати від батарей.</li>
 <li><b>${r.pin_gen} → реле 2 (IN2)</b>: сухі контакти АВР генератора. Замкнуто, отже генератор працює.</li>
+<li><b>${r.pin_aux1} → реле 3 (IN3)</b>: нуль котушки двополюсного контактора зарядників Cherokee, <b>через NC-контакт</b>. Реле відпущене, отже зарядники працюють; під напругою, отже вимкнені. Плата зависла, перезавантажується чи без живлення: батарея заряджається.</li>
 <li>${r.relay_active_high?'Модуль реле в режимі <b>High level trigger</b> (перемички S1 і S2 на «High»): HIGH вмикає реле, LOW або обірваний провід вимикає. Під час старту, перезавантаження чи без живлення плати обидва реле вимкнені.':'Реле керуються інверсно: LOW вмикає. Під час старту і перезавантаження обидва вимкнені.'}</li>
 <li>Живлення модуля: ${r.relay_active_high?'<b>DC+ → VU</b> (5 В з USB), DC− → G. Не VIN: на цій NodeMCU VIN — лише вхід живлення, при живленні від USB на ньому 0 В. Блок живлення має давати 5 В (на VU 4.7–5.2 В); старий блок давав ~8 В, це забагато для реле.':'VCC → 5 В, GND → GND.'}</li></ul>
 <h3>Запас енергії і пороги</h3>
@@ -280,14 +317,31 @@ function renderHow(){
 <li>Важке навантаження теж має режими: <b>Авто</b> (за порогами сезону), <b>Дозволити</b> (незалежно від порогів), <b>Заборонити</b> (вимкнено, напр. на час ремонту). Аварія за напругою і робота генератора вимикають його в будь-якому режимі. Після перезавантаження зберігається тільки «Заборонити».</li>
 <li>Режими генератора: <b>Авто</b> (за порогами сезону); <b>Запустити до мети</b> (працює, доки запас не дійде до «Генератор СТОП» поточного сезону, потім сам повертається в Авто); <b>Заборонити</b> (не запуститься, доки не повернеш Авто).</li>
 <li>За годину роботи генератор у середньому додає ~0.7 кВт·год (за історією). «Зарядив за сесію» і «До мети» — приблизні оцінки з балансу енергії батареї.</li></ul>
+<h3>Зарядники Cherokee</h3>
+<ul><li>Два car1848tn по ~1.2–1.7 кВт, підключені <b>напряму до батареї</b> повз інвертор. Живляться від фаз A і B через контактор, інвертор на фазі C. Без мережі вони не працюють фізично, хоч би що казала плата. Інвертор і BMS їхнього струму не бачать: для інвертора це «сонце» на DC-шині.</li>
+<li>Логіка працює <b>локально</b>, лише з даними Solar Assistant у локальній мережі. HA дає тільки необов'язкові підказки. Принцип: <b>взимку краще недоотримати сонце, ніж жити з пустою батареєю</b>.</li>
+<li>Пороги за сезонами (налаштовуються вище; зараз ${lastCh?lastCh.profiles.map((p,i)=>`${SN[i]}: ВВІМК &lt; ${p.on} %, ВИМК ≥ ${p.off} %`+(p.floor?`, підлога ${p.floor} %`:'')+(p.sunset?`, до заходу ${p.sunset} %`:'')).join('; '):'…'}).</li></ul>
+<p><b>Порядок рішень</b> (перше, що спрацювало, перемагає):</p>
+<ol><li><b>Аварійне вимкнення</b> (лише на свіжих даних): найвища комірка ≥ 3.65 В або напруга BMS ≥ 54.5 В протягом 30 с; BMS заборонила заряд (CCL 0) нижче 95 % SOC протягом 1 хв; температура батареї ≥ 45 °C або ≤ 2 °C протягом 1 хв. Повернення не раніше ніж за 15 хв, коли комірка ≤ 3.50 В, напруга ≤ 53.5 В, CCL &gt; 0, температура 5–40 °C. Кожне спрацювання одразу йде в Telegram. Три за добу означають <b>блокування до «Прийняв»</b>; виняток: SOC &lt; 20 % і все в нормі.</li>
+<li><b>Аварія за напругою</b> (&lt; 47 В 5 хв) або <b>SOC нижче підлоги</b> сезону: увімкнути в будь-якому режимі, ручну заборону скасовано.</li>
+<li><b>Ручна заборона</b>. Влітку переживає перезавантаження, в інші сезони після перезавантаження стає «Авто».</li>
+<li><b>Немає свіжих даних SA або SOC застиг</b>: увімкнути.</li>
+<li><b>Смикання</b>: понад 6 перемикань за годину, отже увімкнено на 1 год і тривога.</li>
+<li><b>Стеля комірки</b> (зараз ${lastCh&&lastCh.cell_cap>0?lastCh.cell_cap+' В':'вимкнена'}): найвища комірка тримається вище 1 хв, отже вимкнути навіть під час мінімального часу роботи і в ручному «Увімкнути». Без Telegram, це не аварія. Батарея вважається повною: «до 100 %» і «перед заходом» не вмикають, доки SOC не впаде до порогу ВВІМК і комірка не опуститься до 3.45 В. Потрібна, поки одна з Cherokee має уставку 54.0 В.</li>
+<li><b>Ручне «Увімкнути»</b>.</li>
+<li><b>Сезонна логіка</b>: SOC нижче ВВІМК, отже увімкнути. Взимку і в міжсезоння також: SA тримає APL при мережі &lt; 170 В (слабка мережа йде в будинок), тому увімкнути, доки SA не поверне UPS на 10 хв і SOC не підніметься на 2 п.п.; за ≤ 90 хв до заходу SOC нижче цілі; UPS з мережею &lt; 170 В без достатнього сонця. Будь-коли: за підказкою HA скоро відключення (≤ 2 год). <b>Взимку</b> на ${lastCh?lastCh.profiles[2].off:97} % вимикаються, лише якщо є сонце (день і дах ≥ 150 Вт) або інвертор може дозарядити від мережі; інакше працюють до 100 % і вимикаються, коли струм припливу &lt; 3 А 10 хв (перейшли на підтримку), а знову вмикаються на ${lastCh?lastCh.profiles[2].on:95} %. Влітку і в міжсезоння вимикаються на порозі ВИМК.</li></ol>
+<ul><li><b>«Інвертор дозарядить»</b>: режим Grid, пріоритет заряду дозволяє мережу, пріоритет виходу Utility first, мережа ≥ 160 В (APL) або ≥ 180 В (UPS), і так 5 хв. Діапазон APL/UPS SA у локальний MQTT не публікує, тому плата бере його з підказки HA; без неї вважає, що інвертор не дозарядить. Після вимкнення «через інвертор» плата 3 хв чекає струму заряду інвертора &gt; 5 А; якщо його немає, вмикає Cherokee назад і 30 хв інвертору не довіряє.</li>
+<li>Мінімум 15 хв роботи і 10 хв паузи між перемиканнями, крім аварій, стелі комірки, ручних команд і проваленої перевірки інвертора.</li>
+<li><b>Генератор і застиглий SOC</b>: поки Cherokee працюють від мережі і ще 30 хв після, підпис «BMS бачить більше заряду, ніж інвертор» генератором не вважається, а правила застиглого SOC на паузі. Генератор тоді видно лише за його реле або контактом зворотного зв'язку. Важке навантаження через Cherokee не блокується.</li>
+<li><b>Межа захисту</b>: якщо плата мертва, реле на NC і зарядники працюють. Тоді останній рубіж — CV-режим самих Cherokee і BMS Pylontech.</li></ul>
 <h3>Безпека: що буває, коли щось ламається</h3>
-<ul><li><b>Немає даних від Solar Assistant 3 хв</b> (впав SA, брокер або WiFi): важке навантаження вимикається (економ). Генератор, що працює, працює далі, доки є паливо. Генератор, що стоїть, наосліп не запускається.</li>
+<ul><li><b>Немає даних від Solar Assistant 3 хв</b> (впав SA, брокер або WiFi): важке навантаження вимикається (економ), зарядники Cherokee вмикаються. Генератор, що працює, працює далі, доки є паливо. Генератор, що стоїть, наосліп не запускається.</li>
 <li><b>Немає інтернету</b>: усе працює локально, бо SA і брокер у локальній мережі. Пропадають тільки HA і Tuya.</li>
 <li><b>Неправильні дані</b> (<code>unavailable</code>, SOC поза 0–100) ігноруються.</li>
 <li><b>Дані приходять, але SOC застиг</b>: див. «Захист від застиглих даних» нижче.</li>
 <li><b>Перезавантаження</b>: плата вирішує з нуля. Обидва реле вимкнені, доки не прийде свіжий SOC; далі важке навантаження вмикається тільки вище порогу ВВІМК, генератор — тільки нижче СТАРТ (між порогами реле лишається вимкненим). Зберігається лише ручне «Заборонити»; «Дозволити» і «Запустити до мети» скидаються в «Авто».</li>
-<li><b>Плата зависла</b>: watchdog перезавантажить її через 60 с. Поки вона перезавантажується, обидва реле відпущені.</li>
-<li><b>Плата без живлення</b>: обидва реле відпущені, отже економ-режим і генератор стоїть.</li></ul>
+<li><b>Плата зависла</b>: watchdog перезавантажить її через 60 с. Поки вона перезавантажується, усі реле відпущені: економ, генератор стоїть, Cherokee працюють.</li>
+<li><b>Плата без живлення</b>: усі реле відпущені, отже економ-режим, генератор стоїть, зарядники Cherokee працюють (вони на NC).</li></ul>
 <h3>Захист від застиглих даних</h3>
 <p>Буває, що Solar Assistant втрачає зв'язок з Pylontech (USB / консоль), але продовжує публікувати останній SOC. За історією 2024–2026 таке траплялося щонайменше 7 разів: від години до 58 діб (травень–липень 2026 SOC «стояв» на 100 %). Тому плата звіряє SOC з тим, що незалежно вимірює інвертор:</p>
 <ul><li><b>Вночі без мережі</b> все споживання йде з батареї (контролери MakeSkyBlue вночі не працюють). Якщо будинок спожив 1 кВт·год, а SOC не зрушив, SOC застиг. Нормально він змінюється вже після ~0.1 кВт·год. Діє при будь-якому SOC, включно зі 100 %.</li>
@@ -356,21 +410,25 @@ $('save').onclick=async()=>{
 document.querySelectorAll('[data-h]').forEach(b=>b.onclick=async()=>{
  if(b.dataset.h=='on'&&!confirm('Дозволити важке навантаження незалежно від порогів?'))return;
  try{await api('/api/heavy_mode',{method:'POST',body:b.dataset.h});status()}catch(e){alert(e.message)}});
-document.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
- if(b.dataset.a=='on'&&!confirm('Замкнути реле 3?'))return;
- try{await api('/api/aux1',{method:'POST',body:b.dataset.a});status()}catch(e){alert(e.message)}});
+document.querySelectorAll('[data-c]').forEach(b=>b.onclick=async()=>{
+ if(b.dataset.c!='auto'&&!confirm(b.dataset.c=='on'?'Увімкнути зарядники Cherokee незалежно від порогів?':'Заборонити зарядники Cherokee? Аварія за напругою і підлога SOC все одно їх увімкнуть.'))return;
+ try{await api('/api/cherokee_mode',{method:'POST',body:b.dataset.c});status()}catch(e){alert(e.message)}});
+$('chsave').onclick=async()=>{
+ const body={advice_on:+$('chadv').value,cell_cap:+$('chcap').value,profiles:[...$('chprof').children].map(tr=>{const o={};tr.querySelectorAll('input').forEach(i=>o[i.dataset.k]=+i.value);return o})};
+ try{await api('/api/cherokee_settings',{method:'POST',body:JSON.stringify(body)});$('chmsg').innerHTML='<span class="on">збережено</span>';await loadCh();status()}
+ catch(e){$('chmsg').innerHTML='<span class="bad">'+e.message+'</span>'}};
 document.querySelectorAll('[data-m]').forEach(b=>b.onclick=async()=>{
  if(b.dataset.m!='auto'&&!confirm(b.textContent+'?'))return;
  try{await api('/api/gen_mode',{method:'POST',body:b.dataset.m});status()}catch(e){alert(e.message)}});
 $('reboot').onclick=async()=>{if(confirm('Перезавантажити плату?')){await api('/api/reboot',{method:'POST'}).catch(()=>{});logPos=0}};
-$('reset').onclick=async()=>{if(confirm('Вимкнути обидва реле і поставити генератор в авто?')){await api('/api/reset_state',{method:'POST'});status()}};
+$('reset').onclick=async()=>{if(confirm('Вимкнути важке навантаження і генератор, поставити генератор і Cherokee в авто?')){await api('/api/reset_state',{method:'POST'});status()}};
 $('clr').onclick=()=>$('log').textContent='';
 $('upl').onclick=()=>{const f=$('fwfile').files[0];if(!f)return;if(!confirm('Залити '+f.name+' ('+Math.round(f.size/1024)+' КБ)?'))return;
  const fd=new FormData();fd.append('firmware',f,f.name);const x=new XMLHttpRequest();x.open('POST','/update');
  x.upload.onprogress=e=>$('upmsg').textContent=Math.round(e.loaded*100/e.total)+' %';
  x.onload=()=>{$('upmsg').innerHTML=x.status==200?'<span class="on">готово, плата перезавантажується</span>':'<span class="bad">'+x.responseText+'</span>';logPos=0};
  x.onerror=()=>$('upmsg').innerHTML='<span class="bad">помилка з\'єднання</span>';x.send(fd)};
-status();loadSettings();log();loadNotify();setInterval(status,3000);setInterval(log,2000);setInterval(loadNotify,5000);
+status();loadSettings();loadCh();log();loadNotify();setInterval(status,3000);setInterval(log,2000);setInterval(loadNotify,5000);
 </script></body></html>
 )HTML";
 
@@ -383,10 +441,13 @@ static bool authed() {
 // Floats go out as doubles (9.6f -> 9.600000381); round for display.
 static double r2(float v) { return round(v * 100.0) / 100.0; }
 
+// Streamed into the socket: no String copy of the document (see ChunkPrint).
 static void sendJson(JsonDocument& doc) {
-    String out;
+    s_server->setContentLength(measureJson(doc));
+    s_server->send(200, "application/json", "");
+    ChunkPrint out(s_server->client());
     serializeJson(doc, out);
-    s_server->send(200, "application/json", out);
+    out.done();
 }
 
 static void handleRoot() {
@@ -401,7 +462,7 @@ static void handleRoot() {
 static void handleStatus() {
     if (!authed()) return;
 #if defined(ESP8266)
-    DynamicJsonDocument doc(2560);   // ~15 KB free in total there
+    DynamicJsonDocument doc(3584);   // ~15 KB free in total there
 #else
     DynamicJsonDocument doc(4096);
 #endif
@@ -570,15 +631,64 @@ static void handleHeavyMode() {
     s_server->send(200, "text/plain", "ok");
 }
 
-static void handleAux1() {
+static void handleCherokeeMode() {
     if (!authed()) return;
-    String v = bodyWord("state");
+    String v = bodyWord("mode");
     v.trim();
-    if (v != "on" && v != "off") {
-        s_server->send(400, "text/plain", "state must be on|off");
+    cherokee::Mode m;
+    if (!cherokee::Controller::parseMode(v.c_str(), m)) {
+        s_server->send(400, "text/plain", "mode must be auto|on|off");
         return;
     }
-    s_relays->setAux1(v == "on", "web");
+    s_relays->setCherokeeMode(m, "web");
+    s_server->send(200, "text/plain", "ok");
+}
+
+static void handleGetCherokee() {
+    if (!authed()) return;
+    const cherokee::Config& c = s_relays->cherokee().config();
+    DynamicJsonDocument doc(768);
+    doc["advice_on"] = c.adviceOnSoc;
+    doc["cell_cap"] = r2(c.cellCapV);
+    JsonArray arr = doc.createNestedArray("profiles");
+    for (const cherokee::Profile& p : c.p) {
+        JsonObject o = arr.createNestedObject();
+        o["on"] = p.onSoc;
+        o["off"] = p.offSoc;
+        o["floor"] = p.floorSoc;
+        o["sunset"] = p.sunsetSoc;
+    }
+    sendJson(doc);
+}
+
+static void handlePostCherokee() {
+    if (!authed()) return;
+    DynamicJsonDocument doc(768);
+    if (deserializeJson(doc, s_server->arg("plain"))) {
+        s_server->send(400, "text/plain", "bad JSON");
+        return;
+    }
+    cherokee::Config c = s_relays->cherokee().config();
+    int adv = doc["advice_on"] | (int)c.adviceOnSoc;
+    c.cellCapV = doc["cell_cap"] | c.cellCapV;
+    bool inRange = adv >= 0 && adv <= 100;
+    JsonArray arr = doc["profiles"];
+    if (arr.size() == 3) {
+        for (int i = 0; i < 3; i++) {
+            JsonObject o = arr[i];
+            int v[4] = {o["on"] | (int)c.p[i].onSoc, o["off"] | (int)c.p[i].offSoc,
+                        o["floor"] | (int)c.p[i].floorSoc, o["sunset"] | (int)c.p[i].sunsetSoc};
+            for (int k = 0; k < 4; k++) if (v[k] < 0 || v[k] > 100) inRange = false;
+            c.p[i] = {(uint8_t)v[0], (uint8_t)v[1], (uint8_t)v[2], (uint8_t)v[3]};
+        }
+    }
+    c.adviceOnSoc = (uint8_t)adv;
+    const char* err = inRange ? cherokee::validate(c) : "пороги мають бути 0..100 %";
+    if (err) {
+        s_server->send(400, "text/plain; charset=utf-8", err);
+        return;
+    }
+    s_relays->setCherokeeConfig(c);
     s_server->send(200, "text/plain", "ok");
 }
 
@@ -679,7 +789,9 @@ void begin(CompatWebServer& server, RelayController& relays, SystemFiller fillSy
     server.on("/api/settings", HTTP_POST, handlePostSettings);
     server.on("/api/gen_mode", HTTP_POST, handleGenMode);
     server.on("/api/heavy_mode", HTTP_POST, handleHeavyMode);
-    server.on("/api/aux1", HTTP_POST, handleAux1);
+    server.on("/api/cherokee_mode", HTTP_POST, handleCherokeeMode);
+    server.on("/api/cherokee_settings", HTTP_GET, handleGetCherokee);
+    server.on("/api/cherokee_settings", HTTP_POST, handlePostCherokee);
     server.on("/api/gen_feedback", HTTP_POST, handleGenFeedback);
     server.on("/api/reset_state", HTTP_POST, handleResetState);
     server.on("/api/alerts/ack", HTTP_POST, handleAlertAck);

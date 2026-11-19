@@ -132,6 +132,74 @@ ESP32 variant:
 Tuya HTTPS runs in its own FreeRTOS task: each call is a fresh TLS
 handshake, and in `loop()` that used to starve MQTT keepalives.
 
+**Flow D — Cherokee chargers (relay 3, D6)**
+
+Two Cherokee car1848tn chargers (~1.2–1.7 kW each) wired straight to the
+battery, past the inverter, fed from phases A and B through a two-pole
+contactor. The coil's neutral runs through relay 3 on its **NC** contact:
+relay released = chargers ON, energised = OFF. A dead, hung or rebooting
+board leaves the battery charging. No grid = no coil = chargers off,
+whatever the board says. Logic: `src/cherokee.cpp` (pure C++, no Arduino),
+fed once a second by `RelayController::tickCherokee()`.
+
+Local only: LAN Solar Assistant MQTT, no internet / HA / VPS needed. Order:
+
+1. Emergency OFF (fresh data only): highest cell ≥ 3.65 V or BMS ≥ 54.5 V
+   for 30 s; CCL 0 below 95 % SOC for 1 min; battery ≤ 2 / ≥ 45 °C for 1 min.
+   Back after ≥ 15 min once cell ≤ 3.50, V ≤ 53.5, CCL > 0, 5–40 °C. Three
+   trips in 24 h → OFF until "Прийняв" (alarm `cherokee_lock`), except
+   SOC < 20 % with everything normal.
+2. Voltage emergency (< 47 V 5 min) or SOC below the season floor → ON,
+   manual off cancelled.
+3. Manual off (survives a reboot in summer only).
+4. Stale / frozen SOC → ON.
+5. More than 6 switches an hour → ON for 1 h + alarm `cherokee_flap`.
+6. Cell cap (`cell_cap_v`, default 3.55 V, 0 = off) for 1 min → OFF, the
+   battery counts as full until SOC ≤ ON threshold and cell ≤ 3.45 V.
+7. Manual on.
+8. Season logic (SOC %, editable on the web page, NVS key `chcfg`):
+
+   | | Winter | Shoulder | Summer |
+   |---|---|---|---|
+   | ON below | 95 | 60 (85 if HA advises) | 30 |
+   | OFF at | 97 with sun or a charging inverter, else 100 + float | 90 | 50 |
+   | Floor | — | 40 | 30 |
+   | Goal before sunset (≤ 90 min) | 100 | 90 | — |
+
+   Winter/shoulder also: SA in APL with grid < 170 V → ON until UPS for
+   10 min and SOC +2 points. Shoulder: UPS with grid < 170 V and not enough
+   sun → ON. Any season: HA says an outage within 2 h → ON.
+
+"Inverter can charge" = device mode Grid, charger priority allows utility,
+output priority Utility first, grid ≥ 160 V (APL) / 180 V (UPS), held 5 min.
+After switching off for that reason the inverter must show > 5 A of charge
+within 3 min, otherwise the chargers come back and the inverter isn't
+trusted for 30 min. Min 15 min on / 10 min off.
+
+While the chargers run on the grid (and 30 min after), the "BMS sees more
+charge than the inverter" signature doesn't count as the generator and the
+frozen-SOC rules pause.
+
+SA's LAN MQTT (checked 2026-11-19) publishes **no**
+`ac_input_voltage_range`, `total/battery_voltage`, total cell maximum or
+CCL — only its cloud integration (HA) has them. The board takes the cell
+maximum and BMS voltage from `battery_1..4/cell_voltage_-_highest` and
+`battery_N/voltage`, the APL/UPS range from the HA hint, and the CCL rule
+has no data until SA publishes it.
+
+Optional HA hint, retained JSON on `dacha_relays/hint` (HA broker), ignored
+after 3 h (by `ts` if present, else by arrival):
+
+```json
+{"chargers_advice": "on", "surplus": false, "outage_soon_min": 95,
+ "ac_range": "UPS", "ts": 1795041039}
+```
+
+Telegram (`/cherokee`) and HA (`select`/sensor `cherokee_mode`, signed
+command `cherokee_mode` = auto / on / off through the bridge). Scenario
+tests: `c++ -std=c++17 -Iinclude test/cherokee_sim.cpp src/cherokee.cpp -o
+/tmp/cherokee_sim && /tmp/cherokee_sim`.
+
 ## VPS bridge (vps/dacha-bridge)
 
 A small Python service in the VPS k3s (namespace `homeassistant`, next to HA
@@ -143,6 +211,7 @@ and Mosquitto) — see `vps/dacha-bridge/bridge.py` and `k8s/deployment.yaml`:
   -> Tuya virtual MUST device.
 - Telegram for board alerts (`dacha_relays/alert`), with "Прийняв" sent back
   as a signed command; watchdogs for "board silent" and "HA down".
+  Commands: /status, /gen, /heavy, /cherokee, /help.
 - Signed commands `dacha_relays/cmd` = {c, a, t, s}, s = HMAC-SHA256(CMD_SECRET,
   "c|a|t"), ±5 min, monotonic t.
 
@@ -193,6 +262,7 @@ include/
   tuya_cloud_client.h Tuya Cloud OpenAPI client (HMAC signing, token).
   sm_config.h         SmSegment struct shared by SolarManagerDevice.
   relay_controller.h  Heavy-load / generator relays, fail-safe rules.
+  cherokee.h          Cherokee chargers on relay 3 (pure logic, tested on the Mac).
   settings.h          Season profiles + capacity, persisted in NVS.
   ha_relays.h         HA MQTT discovery + commands for the relays.
   web_ui.h            Web debug UI + JSON API.

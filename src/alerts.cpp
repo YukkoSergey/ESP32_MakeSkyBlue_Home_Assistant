@@ -38,7 +38,8 @@ LPAvTK33sefOT6jEm0pUBsV/fdUID+Ic/n4XuKxe9tQWskMJDE32p2u0mYRlynqI
 -----END CERTIFICATE-----
 )PEM";
 
-static const char* kKeyNames[Alerts::kCount] = {"stale", "frozen", "voltage", "ha_down", "broker_down", "gen_no_start"};
+static const char* kKeyNames[Alerts::kCount] = {"stale", "frozen", "voltage", "ha_down", "broker_down", "gen_no_start",
+                                                "cherokee_lock", "cherokee_flap"};
 
 // --- shared between the main loop, the web UI and the Telegram task ----------
 struct OutMsg   { String text; int ackKey; };   // ackKey < 0: no button
@@ -270,6 +271,8 @@ const char* Alerts::title(Key k) {
         case HaDown:        return "Home Assistant не відповідає";
         case BrokerDown:    return "MQTT-брокер Home Assistant недоступний";
         case GenNoStart:    return "генератор не працює, хоча плата його запустила";
+        case CherokeeLock:  return "Cherokee заблоковані після 3 аварійних вимкнень за добу";
+        case CherokeeFlap:  return "Cherokee часто перемикаються, заблоковано в УВІМК на 1 год";
         default:            return "?";
     }
 }
@@ -415,6 +418,9 @@ void Alerts::clear(Key k) {
 }
 
 bool Alerts::ack(const String& key, const char* by) {
+    // The lockout ack is a command, not just "seen": it unlocks the chargers
+    // even if the alarm here was already silenced (or the board rebooted).
+    if (key == "cherokee_lock" && _ackHook) _ackHook(key.c_str(), by);
     for (int i = 0; i < kCount; i++) {
         if (key == _alarms[i].key && _alarms[i].active && !_alarms[i].acked) {
             _alarms[i].acked = true;
@@ -450,52 +456,55 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         bool crash = _resetKind == ResetKind::Crash || _resetKind == ResetKind::Watchdog ||
                      _resetKind == ResetKind::Brownout;
         send("boot", crash ? "warning" : "info",
-             String("плата запустилась, причина: ") + resetReasonUa(_resetKind),
-             _crashInfo.length() ? "Дані збою: " + _crashInfo : String(), -1);
+             String(F("плата запустилась, причина: ")) + resetReasonUa(_resetKind),
+             _crashInfo.length() ? String(F("Дані збою: ")) + _crashInfo : String(), -1);
     }
 
     // Alarm details are only built when an alarm starts (raise() ignores the
     // text while active) — this runs every loop pass.
     // Stale SA data.
     if (!r.socFresh() && now > kBootGraceMs && !_alarms[Stale].active) {
-        raise(Stale, "Важке навантаження вимкнено (економ-режим). Перевір Solar Assistant, WiFi у сараї "
-                     "і MQTT-брокер 192.168.31.251.");
+        raise(Stale, String(F("Важке навантаження вимкнено (економ-режим), зарядники Cherokee увімкнені. Перевір Solar "
+                     "Assistant, WiFi у сараї і MQTT-брокер 192.168.31.251.")));
     } else if (r.socFresh()) {
         clear(Stale);
     }
 
     // Frozen SOC.
     if (r.socFrozen()) {
-        if (!_alarms[Frozen].active) raise(Frozen, String("Значення стоїть на ") + r.soc() + " %: " + r.frozenReason() +
-                      ".\nСхоже, Solar Assistant не читає Pylontech (USB / консоль). Важке навантаження "
-                      "вимкнено, генератор лишається як був. Перезапусти SA або перевір кабель до батарей.");
+        if (!_alarms[Frozen].active) raise(Frozen, String(F("Значення стоїть на ")) + r.soc() + " %: " + r.frozenReason() +
+                      String(F(".\nСхоже, Solar Assistant не читає Pylontech (USB / консоль). Важке навантаження "
+                      "вимкнено, генератор лишається як був, зарядники Cherokee увімкнені. Перезапусти SA або перевір кабель до батарей.")));
     } else {
         clear(Frozen);
     }
 
     // Voltage emergency.
     if (r.voltEmergency()) {
-        if (!_alarms[VoltEmergency].active) raise(VoltEmergency, String("Батарея нижче ") + String(RelayController::kVoltEmergencyV, 1) +
-                             " В понад 5 хв — вона майже порожня, хоч би що показував SOC. Важке навантаження "
-                             "вимкнено, генератор запускається (якщо не заборонений вручну). Перевір паливо.");
+        if (!_alarms[VoltEmergency].active) raise(VoltEmergency, String(F("Батарея нижче ")) + String(RelayController::kVoltEmergencyV, 1) +
+                             String(F(" В понад 5 хв — вона майже порожня, хоч би що показував SOC. Важке навантаження "
+                             "вимкнено, генератор запускається (якщо не заборонений вручну), зарядники Cherokee "
+                             "увімкнені в будь-якому режимі (якщо є мережа). Перевір паливо.")));
     } else {
         clear(VoltEmergency);
     }
 
     // Generator commanded but not running (feedback contact).
     if (r.genNoStartAlarm()) {
-        if (!_alarms[GenNoStart].active) raise(GenNoStart, "Реле генератора замкнуте вже понад 3 хв, а контакт зворотного зв'язку не замкнувся "
+        if (!_alarms[GenNoStart].active) raise(GenNoStart, String(F("Реле генератора замкнуте вже понад 3 хв, а контакт зворотного зв'язку не замкнувся "
                           "(або розімкнувся). Генератор не завівся або зупинився сам: перевір паливо, "
-                          "акумулятор генератора і АВР.");
+                          "акумулятор генератора і АВР.")));
     } else {
         clear(GenNoStart);
     }
 
+    cherokeeEvents(r);
+
     // Real generator start / stop from the feedback contact.
     if (r.genFeedbackEnabled() && r.genFeedbackRunning() != _lastFbRunning) {
         _lastFbRunning = r.genFeedbackRunning();
-        send("generator_fb", "info", String("генератор ") + (_lastFbRunning ? "реально ЗАПРАЦЮВАВ" : "реально зупинився"),
-             _lastFbRunning && !r.generatorOn() ? "Плата його не запускала: завели вручну або власна автоматика генератора." : "", -1);
+        send("generator_fb", "info", String(F("генератор ")) + (_lastFbRunning ? String(F("реально ЗАПРАЦЮВАВ")) : String(F("реально зупинився"))),
+             _lastFbRunning && !r.generatorOn() ? String(F("Плата його не запускала: завели вручну або власна автоматика генератора.")) : "", -1);
     }
 
     // HA broker reachability.
@@ -505,17 +514,17 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
     } else {
         if (!_haDisconnectedSinceMs) _haDisconnectedSinceMs = now;
         if (now - _haDisconnectedSinceMs >= kBrokerDownMs && !_alarms[BrokerDown].active)
-            raise(BrokerDown, String("Плата не може підключитись до ") + MQTT_HA_HOST + ":" + MQTT_HA_PORT +
-                              " вже " + String((now - _haDisconnectedSinceMs) / 60000) +
-                              " хв. HA не отримує даних і не надішле push. Перевір VPS.");
+            raise(BrokerDown, String(F("Плата не може підключитись до ")) + MQTT_HA_HOST + ":" + MQTT_HA_PORT +
+                              String(F(" вже ")) + String((now - _haDisconnectedSinceMs) / 60000) +
+                              String(F(" хв. HA не отримує даних і не надішле push. Перевір VPS.")));
     }
 
     // HA itself (only once its heartbeat automation has been seen).
     if (haMqttConnected && _haOffline) {
-        if (!_alarms[HaDown].active) raise(HaDown, "HA повідомив через MQTT, що він offline (LWT). Push-сповіщень з телефона не буде.");
+        if (!_alarms[HaDown].active) raise(HaDown, String(F("HA повідомив через MQTT, що він offline (LWT). Push-сповіщень з телефона не буде.")));
     } else if (haMqttConnected && _lastHeartbeatMs && now - _lastHeartbeatMs >= kHaHeartbeatMs) {
-        if (!_alarms[HaDown].active) raise(HaDown, "Немає пульсу від HA вже " + String((now - _lastHeartbeatMs) / 60000) +
-                      " хв, хоча брокер працює. Push-сповіщень з телефона не буде. Перевір HA на VPS.");
+        if (!_alarms[HaDown].active) raise(HaDown, String(F("Немає пульсу від HA вже ")) + String((now - _lastHeartbeatMs) / 60000) +
+                      String(F(" хв, хоча брокер працює. Push-сповіщень з телефона не буде. Перевір HA на VPS.")));
     } else if (haMqttConnected && !_haOffline && _lastHeartbeatMs && now - _lastHeartbeatMs < kHaHeartbeatMs) {
         clear(HaDown);
     }
@@ -528,7 +537,7 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
         uint32_t t = millis();
         if (a.active && !a.acked && t - a.lastSentMs >= kRepeatMs) {
             a.lastSentMs = t;
-            send(a.key, "repeat", String("нагадування (не прийнято): ") + title((Key)i), a.detail, i);
+            send(a.key, "repeat", String(F("нагадування (не прийнято): ")) + title((Key)i), a.detail, i);
         }
     }
 
@@ -536,9 +545,9 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
     if (!_genKnown) { _genKnown = true; _lastGen = r.generatorOn(); }
     if (r.generatorOn() != _lastGen) {
         _lastGen = r.generatorOn();
-        String res = r.socTrusted() ? String(r.reserveKwh(), 1) + " кВт·год" : String("невідомий");
-        send("generator", "info", String("генератор ") + (_lastGen ? "ЗАПУЩЕНО" : "зупинено"),
-             String("Режим ") + RelayController::genModeName(r.genMode()) + ", запас " + res + ".", -1);
+        String res = r.socTrusted() ? String(r.reserveKwh(), 1) + String(F(" кВт·год")) : String(F("невідомий"));
+        send("generator", "info", String(F("генератор ")) + (_lastGen ? String(F("ЗАПУЩЕНО")) : String(F("зупинено"))),
+             String(F("Режим ")) + RelayController::genModeName(r.genMode()) + String(F(", запас ")) + res + ".", -1);
     }
 
     // Text for /status (direct Telegram only; on ESP8266 the VPS answers).
@@ -546,17 +555,88 @@ void Alerts::tick(const RelayController& r, bool haMqttConnected) {
     static uint32_t lastStatus = 0;
     if (now - lastStatus > 5000) {
         lastStatus = now;
-        String st = "📊 Дача: SOC " + String(r.soc()) + " %, запас " + String(r.reserveKwh(), 1) + " кВт·год, сезон " +
-                    settings::seasonName(r.activeSeason()) + ".\nВажке навантаження: " +
-                    (r.heavyLoadOn() ? "дозволене" : "економ") + ". Генератор: " +
-                    (r.generatorOn() ? "працює" : "стоїть") + " (режим " + RelayController::genModeName(r.genMode()) + ").";
+        String st = String(F("📊 Дача: SOC ")) + String(r.soc()) + String(F(" %, запас ")) + String(r.reserveKwh(), 1) + String(F(" кВт·год, сезон ")) +
+                    settings::seasonName(r.activeSeason()) + String(F(".\nВажке навантаження: ")) +
+                    (r.heavyLoadOn() ? String(F("дозволене")) : String(F("економ"))) + String(F(". Генератор: ")) +
+                    (r.generatorOn() ? String(F("працює")) : String(F("стоїть"))) + String(F(" (режим ")) + RelayController::genModeName(r.genMode()) + ").";
         for (int i = 0; i < kCount; i++)
-            if (_alarms[i].active) st += String("\n🚨 ") + title((Key)i) + (_alarms[i].acked ? " (прийнято)" : "");
+            if (_alarms[i].active) st += String("\n🚨 ") + title((Key)i) + (_alarms[i].acked ? String(F(" (прийнято)")) : "");
         lock();
         s_statusText = st;
         unlock();
     }
 #endif
+}
+
+// Cherokee: alarms that hold (lockout, flapping) plus one-shot messages for
+// every emergency trip — sent at once, never repeated.
+void Alerts::cherokeeEvents(const RelayController& r) {
+    const cherokee::Controller& ch = r.cherokee();
+    if (ch.lockout()) {
+        if (!_alarms[CherokeeLock].active)
+            raise(CherokeeLock, String(F("Зарядники Cherokee вимкнені, доки не натиснеш «Прийняв» (у Telegram, на сторінці плати "
+                                "або в HA). Перед цим перевір батарею (комірки, температуру, BMS) і уставки Cherokee. "
+                                "Виняток: якщо SOC впаде нижче 20 % і все в нормі, плата увімкне їх сама.")));
+    } else {
+        clear(CherokeeLock);
+    }
+    if (ch.flapLocked()) {
+        if (!_alarms[CherokeeFlap].active)
+            raise(CherokeeFlap, String(F("Зарядники перемикались ")) + ch.switchesLastHour(millis()) +
+                                String(F(" разів за годину. Щоб не палити контактор, вони увімкнені на 1 год без перемикань. "
+                                "Аварійне вимкнення (комірка, напруга, температура) діє й зараз. Подивись причини в лозі плати.")));
+    } else {
+        clear(CherokeeFlap);
+    }
+
+    cherokee::Event ev;
+    while (ch.eventAfter(_chEvSeq, ev)) {
+        _chEvSeq = ev.seq;
+        switch (ev.kind) {
+            case cherokee::EvEmergOff: {
+                String t;
+                switch (ev.cause) {
+                    case cherokee::CauseCell:
+                        t = String(F("Найвища комірка ")) + String(ev.v1, 3) + String(F(" В (поріг 3.65 В) понад 30 с. Повернуться не раніше ніж "
+                            "за 15 хв, коли комірка опуститься до 3.50 В.")); break;
+                    case cherokee::CauseBmsV:
+                        t = String(F("Напруга батареї (BMS) ")) + String(ev.v1, 2) + String(F(" В (поріг 54.5 В) понад 30 с. Повернуться не раніше "
+                            "ніж за 15 хв, коли напруга впаде до 53.5 В.")); break;
+                    case cherokee::CauseCcl:
+                        t = String(F("BMS заборонила заряд (рекомендований струм 0 А) при SOC ")) + String((int)ev.v2) +
+                            String(F(" %, понад 1 хв. Це не кінець заряду: перевір температуру, комірки, помилки BMS.")); break;
+                    default:
+                        t = String(F("Температура батареї ")) + String(ev.v1, 1) + String(F(" °C поза межами 2…45 °C понад 1 хв. Повернуться, "
+                            "коли буде 5…40 °C, не раніше ніж за 15 хв.")); break;
+                }
+                t += String(F("\nСпрацювань за добу: ")) + ch.emergTrips24h(millis()) + String(F(" (після третього — блокування до «Прийняв»)."));
+                send("cherokee_emerg", "warning", String(F("АВАРІЙНО вимкнено зарядники Cherokee")), t, -1);
+                break;
+            }
+            case cherokee::EvEmergClear:
+                send("cherokee_emerg", "info", String(F("зарядники Cherokee знову дозволені")),
+                     String(F("Минуло 15 хв і параметри батареї в нормі; далі працює звичайна логіка.")), -1);
+                break;
+            case cherokee::EvLockLowSoc:
+                send("cherokee_lock_low", "warning", String(F("Cherokee увімкнено попри блокування")),
+                     "SOC " + String((int)ev.v1) + String(F(" % (нижче 20 %), а всі параметри батареї зараз у нормі. Блокування "
+                     "лишається: щойно щось вийде за межі, зарядники вимкнуться.")), -1);
+                break;
+            case cherokee::EvFloorOn:
+                send("cherokee_floor", "warning", String(F("аварійно увімкнено зарядники Cherokee")),
+                     "SOC " + String((int)ev.v1) + String(F(" % нижче підлоги сезону ")) + String((int)ev.v2) +
+                     String(F(" %. Ручна заборона (якщо була) скасована.")), -1);
+                break;
+            case cherokee::EvInvNotCharging:
+                send("cherokee_inv", "warning", String(F("інвертор не дозаряджає, Cherokee увімкнено назад")),
+                     String(F("Cherokee вимкнули на 97 %, щоб останні відсотки добрав інвертор від мережі, але за 3 хв його струм "
+                     "заряду не перевищив 5 А (максимум ")) + String(ev.v1, 1) + String(F(" А). 30 хв плата не розраховує на "
+                     "інвертор. Перевір режим MUST (пріоритети, діапазон APL/UPS) і напругу мережі.")), -1);
+                break;
+            default:
+                break;   // lockout / flapping are alarms above; their end comes as "resolved"
+        }
+    }
 }
 
 void Alerts::fillStatus(JsonObject o) const {

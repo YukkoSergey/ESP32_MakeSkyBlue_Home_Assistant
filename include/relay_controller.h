@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include "compat.h"
 #include "settings.h"
+#include "cherokee.h"
 
 // -----------------------------------------------------------------------------
 // Two active-LOW relays driven by battery reserve from Solar Assistant
@@ -14,8 +15,8 @@
 //                  in the house (boiler, floor heating, AC / heat pump may run
 //                  from the batteries). Hysteresis on reserve kWh.
 //   * Generator  — 2-wire autostart, contact held closed = generator runs.
-//   * Relay 3    — manual only (web UI, HA, Telegram via the VPS bridge); no
-//                  automatic rules yet. Off after every reboot, never persisted.
+//   * Relay 3    — Cherokee chargers, wired on the NC contact: relay released =
+//                  chargers ON (see cherokee.h for the whole logic).
 //
 // Thresholds come from the active season profile (see settings.h).
 //
@@ -79,7 +80,7 @@ public:
 #if defined(ESP8266)
     static constexpr uint8_t  kHeavyLoadPin = 5;    // NodeMCU D1
     static constexpr uint8_t  kGeneratorPin = 4;    // NodeMCU D2
-    static constexpr uint8_t  kAux1Pin      = 12;   // NodeMCU D6, relay 3
+    static constexpr uint8_t  kAux1Pin      = 12;   // NodeMCU D6, relay 3 (Cherokee, NC)
 #else
     static constexpr uint8_t  kHeavyLoadPin = 25;   // was D1 (GPIO5) on the NodeMCU
     static constexpr uint8_t  kGeneratorPin = 26;   // was D2 (GPIO4) on the NodeMCU
@@ -134,9 +135,16 @@ public:
     static bool parseHeavyMode(const String& s, HeavyMode& out);
     // Forget latched relay state and generator mode (back to Auto, both off).
     void resetState();
-    // Relay 3: manual on/off, nothing else drives it.
-    void setAux1(bool on, const char* source);
-    bool aux1On() const         { return _aux1Out; }
+    // Cherokee chargers (relay 3, NC contact: relay energised = chargers OFF).
+    void setCherokeeMode(cherokee::Mode m, const char* source);
+    bool cherokeeAck(const char* source);
+    const cherokee::Controller& cherokee() const { return _ch; }
+    void setCherokeeConfig(const cherokee::Config& c);
+    // Optional hints from Home Assistant (dacha_relays/hint, JSON, TTL 3 h).
+    void onHint(const char* json, unsigned len);
+    // Chargers commanded on with grid present, or less than 30 min ago:
+    // they charge the battery behind the inverter's back.
+    bool chargersRecent() const;
 
     GenMode genMode() const     { return _genMode; }
     bool heavyLoadOn() const    { return _heavyOut; }
@@ -167,7 +175,8 @@ public:
     // rate; negative if unknown.
     float genEtaHours() const;
 
-    void fillStatus(JsonObject o) const;
+    // full = false: the compact set for the HA state topic.
+    void fillStatus(JsonObject o, bool full = true) const;
     // Old ESP8266 endpoint format, kept for anything that still polls it.
     String legacyStatusJson() const;
 
@@ -187,6 +196,9 @@ private:
     void onInverterBatteryVoltage(float v);
     void updateChargerDetect();
     void updateGenFeedback();
+    void tickCherokee();
+    bool handleCherokeeTopic(const char* topic, const char* payload);
+    void fillCherokee(JsonObject o, bool full) const;
     const SeasonProfile& profile() const { return _cfg.profiles[(int)activeSeason()]; }
 
     Settings    _cfg;
@@ -235,7 +247,6 @@ private:
     // What's actually on the pins.
     bool     _heavyOut = false;
     bool     _genOut   = false;
-    bool     _aux1Out  = false;
 
     // Current / last generator session.
     uint32_t _genOnSinceMs  = 0;
@@ -248,6 +259,35 @@ private:
     uint32_t _genFbRawSinceMs = 0;
     uint32_t _genNotRunningSinceMs = 0;
     bool     _genNoStart = false;
+
+    // Cherokee inputs (LAN SA) and state.
+    cherokee::Controller _ch;
+    uint32_t _lastChEvalMs = 0;
+    bool     _chEffective = true;    // relay released at boot: chargers on
+    uint32_t _chEffOffMs = 0;
+    bool     _chLastOn = true;
+    float    _pvW = 0;         uint32_t _pvMs = 0;
+    float    _totBmsV = 0;     uint32_t _totBmsVMs = 0;
+    float    _totCellV = 0;    uint32_t _totCellMs = 0;
+    float    _packCellV[4] = {}; uint32_t _packCellMs[4] = {};
+    float    _packV[4] = {};     uint32_t _packVMs[4] = {};
+    float    _ccl = 0;         uint32_t _cclMs = 0;
+    float    _batTemp = 0;     uint32_t _batTempMs = 0;
+    cherokee::Tri     _devGrid = cherokee::Tri::Unknown;    uint32_t _devModeMs = 0;
+    cherokee::Tri     _chgUtility = cherokee::Tri::Unknown; uint32_t _chgPrioMs = 0;
+    cherokee::OutPrio _outPrio = cherokee::OutPrio::Unknown; uint32_t _outPrioMs = 0;
+    cherokee::AcRange _range = cherokee::AcRange::Unknown;  uint32_t _rangeMs = 0;
+    float    _invBatI = 0;
+    // Home Assistant hint.
+    uint32_t _hintMs = 0;   bool _haveHint = false;
+    cherokee::Tri     _hintAdvice = cherokee::Tri::Unknown;
+    bool     _hintSurplus = false;
+    int      _hintOutageMin = -1;
+    cherokee::AcRange _hintRange = cherokee::AcRange::Unknown;
+    // Sun, cached once a minute.
+    uint32_t _sunCalcMs = 0;  bool _sunCalcDone = false;
+    bool     _day = false;    int _toSunsetMin = -1;
+    cherokee::Inputs _lastIn;
 
     uint32_t _changes = 0;
 };

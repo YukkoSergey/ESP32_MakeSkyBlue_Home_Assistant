@@ -72,7 +72,7 @@ HTTP_PORT = int(E("HTTP_PORT", "8080"))
 
 # Board commands anyone outside Telegram may send, and their allowed values.
 BOARD_COMMANDS = {"gen_mode": {"auto", "run", "off"}, "heavy_mode": {"auto", "on", "off"},
-                  "aux1": {"on", "off"}}
+                  "cherokee_mode": {"auto", "on", "off"}}
 
 FIRMWARE = "vps-bridge-1.0"
 BOARD_SILENT_S = 5 * 60
@@ -329,7 +329,7 @@ class Telegram:
             {"command": "status", "description": "Поточний стан"},
             {"command": "gen", "description": "Генератор: запустити / заборонити / авто"},
             {"command": "heavy", "description": "Важке навантаження: авто / дозволити / заборонити"},
-            {"command": "relay3", "description": "Реле 3: замкнути / розімкнути"},
+            {"command": "cherokee", "description": "Зарядники Cherokee: авто / увімкнути / заборонити"},
             {"command": "help", "description": "Підказка по командах"},
         ])
 
@@ -391,9 +391,10 @@ class Telegram:
             self.send(self.b.gen_text(), buttons=[
                 [("▶️ Запустити до мети", "ask:gen_mode:run")],
                 [("⏹ Заборонити", "do:gen_mode:off"), ("🔄 Авто", "do:gen_mode:auto")]])
-        elif text.startswith("/relay3"):
-            self.send(self.b.aux1_text(), buttons=[
-                [("🔌 Замкнути", "ask:aux1:on"), ("⭕ Розімкнути", "do:aux1:off")]])
+        elif text.startswith("/cherokee") or text.startswith("/relay3"):
+            self.send(self.b.cherokee_text(), buttons=[
+                [("🔄 Авто", "do:cherokee_mode:auto")],
+                [("⚡ Увімкнути", "ask:cherokee_mode:on"), ("⛔ Заборонити", "ask:cherokee_mode:off")]])
         elif text.startswith("/heavy"):
             self.send(self.b.heavy_text(), buttons=[
                 [("🔄 Авто", "do:heavy_mode:auto"), ("⛔ Заборонити", "do:heavy_mode:off")],
@@ -405,7 +406,11 @@ class Telegram:
 
 
 CONFIRM_TEXT = {
-    ("aux1", "on"): "Замкнути реле 3 (D6)?",
+    ("cherokee_mode", "on"): "Увімкнути зарядники Cherokee незалежно від порогів? "
+                             "Аварійне вимкнення і стеля комірки все одно їх вимкнуть.",
+    ("cherokee_mode", "off"): "Заборонити зарядники Cherokee? Аварія за напругою і підлога SOC "
+                              "все одно їх увімкнуть. Взимку і в міжсезоння заборона не переживає "
+                              "перезавантаження плати.",
     ("gen_mode", "run"): "Запустити генератор? Він працюватиме, доки запас не дійде до мети поточного сезону.",
     ("heavy_mode", "on"): "Дозволити важке навантаження незалежно від порогів? "
                           "Аварія за напругою і робота генератора все одно його вимкнуть.",
@@ -415,13 +420,29 @@ HELP_TEXT = (
     "/status — стан: заряд, запас, важке навантаження, генератор, мережа\n"
     "/gen — генератор: ▶️ запустити до мети / ⏹ заборонити / 🔄 авто\n"
     "/heavy — важке навантаження: 🔄 авто / ⛔ заборонити / ⚡ дозволити\n"
-    "/relay3 — реле 3 (D6), лише вручну: замкнути / розімкнути\n"
+    "/cherokee — зарядники Cherokee: 🔄 авто / ⚡ увімкнути / ⛔ заборонити\n"
     "/help — ця підказка\n\n"
     "Тривоги приходять самі, з кнопкою «✅ Прийняв» — після неї нагадування припиняються.\n"
     "Запуск генератора і «дозволити» перепитують підтвердження. Команди йдуть на плату з підписом; "
     "бот слухає тільки цей чат."
 )
-AUX_UA = {"on": "замкнути", "off": "розімкнути"}
+CH_UA = {"auto": "авто", "on": "увімкнено вручну", "off": "заборонено вручну"}
+# Board reason codes (relay_controller / cherokee.cpp), for Telegram.
+CH_REASON_UA = {
+    "boot": "старт плати", "emerg_cell": "АВАРІЯ: комірка ≥ 3.65 В", "emerg_bms_v": "АВАРІЯ: напруга BMS ≥ 54.5 В",
+    "emerg_ccl": "АВАРІЯ: BMS заборонила заряд", "emerg_temp": "АВАРІЯ: температура батареї",
+    "emerg_lock": "блокування після 3 аварій за добу (потрібне «Прийняв»)",
+    "emerg_lock_low_soc": "блокування, але SOC < 20 % і все в нормі", "volt_emerg": "аварія за напругою",
+    "soc_floor": "SOC нижче підлоги", "manual_off": "заборонено вручну", "manual_on": "увімкнено вручну",
+    "no_data": "немає даних SA", "frozen": "SOC застиг", "flap_lock": "часті перемикання, УВІМК на 1 год",
+    "cell_cap": "стеля комірки", "full": "батарея повна", "soc_low": "SOC нижче порогу",
+    "apl_weak_grid": "SA пускає слабку мережу (APL)", "sunset": "до заходу ≤ 90 хв",
+    "outage_soon": "скоро відключення", "ups_weak_grid": "UPS, слабка мережа, мало сонця",
+    "soc_high": "SOC досяг порогу ВИМК", "sun": "добере сонце", "inverter": "дозаряджає інвертор від мережі",
+    "float": "100 %, на підтримці", "to_full": "до 100 % (інвертор не дозаряджає)", "charging": "заряджаємо",
+    "inv_not_charging": "інвертор не дозаряджав", "inv_lost": "інвертор більше не дозаряджає",
+    "sun_gone": "сонце зникло", "idle": "чекаємо порогу",
+}
 MODE_UA = {"auto": "авто", "run": "запуск до мети", "off": "заборонено", "on": "дозволено вручну"}
 
 
@@ -570,8 +591,8 @@ class Bridge:
         s = self.board_state
         if not s or time.time() - self.board_last > BOARD_SILENT_S:
             return False, "⚠️ Плата зараз не на зв'язку — команду не надіслано."
-        if cmd == "aux1" and "aux1" not in s:
-            return False, self.aux1_text()
+        if cmd == "cherokee_mode" and "cherokee_mode" not in s:
+            return False, self.cherokee_text()
         if cmd == "gen_mode" and arg == "run":
             goal = (s.get("thresholds") or {}).get("gen_stop_kwh")
             if goal is not None and (s.get("reserve_kwh") or 0) >= goal:
@@ -587,7 +608,7 @@ class Bridge:
         s = self.board_state
         if self.board_last <= before or s.get(cmd) != arg:
             return False, f"⚠️ Плата не підтвердила команду ({cmd} = {arg}). Перевір /status."
-        texts = {"gen_mode": self.gen_text, "heavy_mode": self.heavy_text, "aux1": self.aux1_text}
+        texts = {"gen_mode": self.gen_text, "heavy_mode": self.heavy_text, "cherokee_mode": self.cherokee_text}
         return True, texts[cmd]()
 
     def run_board_command(self, cmd: str, arg: str):
@@ -597,7 +618,7 @@ class Bridge:
     def ha_board_command(self, cmd: str, arg: str) -> tuple[bool, str]:
         """Home Assistant: run the command, mirror it to Telegram for the record."""
         ok, text = self.exec_board_command(cmd, arg, "Home Assistant")
-        label = AUX_UA.get(arg, arg) if cmd == "aux1" else MODE_UA.get(arg, arg)
+        label = CH_UA.get(arg, arg) if cmd == "cherokee_mode" else MODE_UA.get(arg, arg)
         self.tg.send(f"🏠 Команда з Home Assistant: {cmd} = {label}.\n" + text)
         return ok, text
 
@@ -616,13 +637,27 @@ class Bridge:
                 f"Запас {s.get('reserve_kwh')} кВт·год; авто-старт < {th.get('gen_start_kwh')}, "
                 f"мета / стоп > {th.get('gen_stop_kwh')}.")
 
-    def aux1_text(self) -> str:
+    def cherokee_text(self) -> str:
         s = self.board_state
         if not s:
             return "Від плати ще немає даних."
-        if "aux1" not in s:
-            return "Реле 3: прошивка плати його ще не знає (потрібне оновлення через OTA)."
-        return f"🔌 Реле 3 (D6): {'ЗАМКНУТЕ' if s.get('aux1') == 'on' else 'розімкнуте'}. Керується лише вручну."
+        if "cherokee" not in s:
+            return "Cherokee: прошивка плати ще не знає зарядників (потрібне оновлення через OTA)."
+        on = s.get("cherokee") == "on"
+        reason = s.get("cherokee_reason", "")
+        t = (f"🔋 Зарядники Cherokee: {'ПРАЦЮЮТЬ' if on else 'вимкнені'} — "
+             f"{CH_REASON_UA.get(reason, reason)} (режим {CH_UA.get(s.get('cherokee_mode'), s.get('cherokee_mode'))}).")
+        if on and (s.get("grid_v") or 0) < 100:
+            t += "\nМережі немає: фізично вони стоять."
+        extra = []
+        if (s.get("cell_max_v") or 0) > 0:
+            extra.append(f"комірка макс {s['cell_max_v']} В")
+        extra.append(f"інвертор дозарядить: {'так' if s.get('inv_can_charge') else 'ні'}")
+        extra.append(f"перемикань за годину {s.get('cherokee_switches_1h', 0)}")
+        t += "\n" + ", ".join(extra) + "."
+        if s.get("cherokee_lock"):
+            t += "\n⛔ Блокування після аварій: натисни «Прийняв» у тривозі, щоб зняти."
+        return t
 
     def heavy_text(self) -> str:
         s = self.board_state
@@ -658,7 +693,8 @@ class Bridge:
         return (f"📊 Дача: SOC {s.get('soc')} %, запас {s.get('reserve_kwh')} кВт·год, сезон {s.get('season')}.\n"
                 f"Важке навантаження: {heavy} (режим {s.get('heavy_mode', 'auto')}). "
                 f"Генератор: {gen} (режим {s.get('gen_mode')}).\n"
-                f"Мережа: {'є' if (s.get('grid_v') or 0) >= 100 else 'немає'}. Дані плати {age} с тому.")
+                f"Мережа: {'є' if (s.get('grid_v') or 0) >= 100 else 'немає'}. Дані плати {age} с тому."
+                + (f"\n{self.cherokee_text()}" if "cherokee" in s else ""))
 
     # --- our own watchdogs ---------------------------------------------------
     def watch_alarm(self, key: str, active: bool, title: str, text: str):
@@ -779,7 +815,7 @@ class Bridge:
                              "плата в сараї мовчить",
                              "Немає даних від плати понад 5 хв. Можливі причини: зникло живлення плати, "
                              "WiFi або інтернет на дачі, плата зависла. Реле без плати відпущені "
-                             "(економ, генератор від плати не запуститься).")
+                             "(економ, генератор від плати не запуститься, зарядники Cherokee працюють).")
             try:
                 # Public endpoint: /api/ without a token made HA log (and
                 # notify about) a failed login every minute.

@@ -302,7 +302,7 @@ static bool kickHaMqtt() {
     freshClient(haTcp, mqttHa);
     mqttHa.setServer(MQTT_HA_HOST, MQTT_HA_PORT);
     mqttHa.setCallback(onHaMessage);
-    mqttHa.setBufferSize(1536);   // discovery ~400 B, relay state ~1 KB
+    mqttHa.setBufferSize(1024);   // discovery ~500 B; the state (~1.4 KB) is streamed
     mqttHa.setSocketTimeout(2);
     mqttHa.setKeepAlive(60);
     if (!mqttHa.connect("nodemcu-relays-ha", MQTT_HA_USERNAME, MQTT_HA_PASSWORD)) {
@@ -369,6 +369,8 @@ void setup() {
     // Relays first: restore their state before anything slow happens.
     relays.begin(settings::load());
     alerts.begin(compatResetKind());
+    // "Прийняв" on the Cherokee lockout alarm (web, Telegram, HA) unlocks it.
+    alerts.setAckHook([](const char*, const char* by) { relays.cherokeeAck(by); });
     alerts.setCrashInfo(crash);
 
     haRelays.begin(&mqttHa, false);   // no TLS on this board: HA is read-only
@@ -386,6 +388,25 @@ void loop() {
     bool wifiUp = WiFi.status() == WL_CONNECTED;
     g_crumb = 3; bool lanOk = wifiUp && kickLanMqtt();
     g_crumb = 4; bool haOk  = wifiUp && kickHaMqtt();
+
+    // Zombie link: WiFi says connected, yet neither broker (one on the LAN,
+    // one on the internet) accepts a TCP connection — seen 2026-11-19 for
+    // ~1 h at -84 dBm, pings to the board lost too, cured by nothing. Drop
+    // the association and let kickWifi() rescan (maybe the other AP).
+    static uint32_t netDeadSinceMs = 0;
+    if (!wifiUp || lanOk || haOk) {
+        netDeadSinceMs = 0;
+    } else if (!netDeadSinceMs) {
+        netDeadSinceMs = millis();
+    } else if (millis() - netDeadSinceMs > 5UL * 60UL * 1000UL) {
+        Log.printf("[WiFi] connected (rssi %d dBm) but no broker reachable for 5 min -> reconnecting WiFi\n",
+                   WiFi.RSSI());
+        netDeadSinceMs = 0;
+        stopNetClients();
+        WiFi.disconnect(false);
+        wifiUp = false;
+        lanOk = haOk = false;
+    }
     g_crumb = 5; if (lanOk) mqttLan.loop();
     checkGuards();
     g_crumb = 6; if (haOk)  mqttHa.loop();

@@ -29,7 +29,8 @@
 // -----------------------------------------------------------------------------
 class Alerts {
 public:
-    enum Key : uint8_t { Stale = 0, Frozen, VoltEmergency, HaDown, BrokerDown, GenNoStart, kCount };
+    enum Key : uint8_t { Stale = 0, Frozen, VoltEmergency, HaDown, BrokerDown, GenNoStart,
+                         CherokeeLock, CherokeeFlap, kCount };
     static constexpr uint32_t kRepeatMs        = 10UL * 60UL * 1000UL;
     // No SOC right after boot is normal; don't call it stale this early.
     static constexpr uint32_t kBootGraceMs     = 5UL * 60UL * 1000UL;
@@ -44,6 +45,9 @@ public:
     // Main loop: watches the relay controller and HA health, queues messages.
     void tick(const RelayController& relays, bool haMqttConnected);
     bool ack(const String& key, const char* by);
+    // Called for an acknowledged "cherokee_lock": that ack also unlocks.
+    typedef void (*AckHook)(const char* key, const char* by);
+    void setAckHook(AckHook h) { _ackHook = h; }
 
     // HA health inputs (from the HA MQTT client, main loop).
     void onHaHeartbeat();
@@ -72,7 +76,11 @@ private:
         String   detail;
         Alarm(const char* k) : key(k) {}
     };
-    Alarm _alarms[kCount] = {{"stale"}, {"frozen"}, {"voltage"}, {"ha_down"}, {"broker_down"}, {"gen_no_start"}};
+    Alarm _alarms[kCount] = {{"stale"}, {"frozen"}, {"voltage"}, {"ha_down"}, {"broker_down"}, {"gen_no_start"},
+                             {"cherokee_lock"}, {"cherokee_flap"}};
+    AckHook  _ackHook = nullptr;
+    uint16_t _chEvSeq = 0;
+    void cherokeeEvents(const RelayController& r);
     bool  _lastFbRunning = false;
     bool  _lastGen = false;
     bool  _genKnown = false;

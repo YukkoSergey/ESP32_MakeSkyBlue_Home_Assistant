@@ -10,7 +10,10 @@ static const char* kStateTopic       = "dacha_relays/state";
 static const char* kGenModeSetTopic  = "dacha_relays/gen_mode/set";
 static const char* kSeasonSetTopic   = "dacha_relays/season_mode/set";
 static const char* kHeavyModeSetTopic = "dacha_relays/heavy_mode/set";
-static const char* kAux1SetTopic     = "dacha_relays/aux1/set";
+static const char* kCherokeeSetTopic = "dacha_relays/cherokee_mode/set";
+// Optional hints from HA for the Cherokee logic (JSON, retained, TTL 3 h):
+// read-only advice, the board works without them.
+static const char* kHintTopic        = "dacha_relays/hint";
 static const char* kDiscoveryPrefix  = "homeassistant";
 static const char* kAlertTopic       = "dacha_relays/alert";
 static const char* kAlertAckTopic    = "dacha_relays/alert/ack";
@@ -81,8 +84,28 @@ void HaRelays::publishDiscovery() {
                   "{{ 'ON' if value_json.generator else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
     publishEntity("binary_sensor", "gen_fb", "Generator running (feedback)",
                   "{{ 'ON' if value_json.gen_fb_running else 'OFF' }}", (e + ",\"dev_cla\":\"running\"").c_str());
-    publishEntity("binary_sensor", "aux1", "Relay 3",
-                  "{{ 'ON' if value_json.aux1 == 'on' else 'OFF' }}", e.c_str());
+    // Relay 3 is the Cherokee chargers now (NC wiring): the old "Relay 3"
+    // entities would show the relay, i.e. the inverse of the chargers.
+    clearEntity(_mqtt, "binary_sensor", "aux1");
+    clearEntity(_mqtt, "switch", "aux1_sw");
+    publishEntity("binary_sensor", "cherokee", "Cherokee chargers",
+                  "{{ 'ON' if value_json.cherokee == 'on' else 'OFF' }}", (e + ",\"dev_cla\":\"battery_charging\"").c_str());
+    publishEntity("sensor", "cherokee_reason", "Cherokee reason", "{{ value_json.cherokee_reason }}", e.c_str());
+    publishEntity("sensor", "cherokee_switches", "Cherokee switches per hour", "{{ value_json.cherokee_switches_1h }}", e.c_str());
+    publishEntity("binary_sensor", "cherokee_lock", "Cherokee emergency lockout",
+                  "{{ 'ON' if value_json.cherokee_lock else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
+    publishEntity("binary_sensor", "cherokee_emerg", "Cherokee emergency off",
+                  "{{ 'ON' if value_json.cherokee_emerg else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
+    publishEntity("binary_sensor", "inv_can_charge", "Inverter can charge from grid",
+                  "{{ 'ON' if value_json.inv_can_charge else 'OFF' }}", e.c_str());
+    publishEntity("sensor", "ext_dc_w", "External DC inflow", "{{ value_json.ext_dc_w }}",
+                  (e + ",\"unit_of_meas\":\"W\",\"dev_cla\":\"power\"").c_str());
+    publishEntity("sensor", "sun_w", "Sun now (chargers off)",
+                  "{{ value_json.sun_w if value_json.sun_w >= 0 else None }}",
+                  (e + ",\"unit_of_meas\":\"W\",\"dev_cla\":\"power\"").c_str());
+    publishEntity("sensor", "cell_max_v", "Battery highest cell",
+                  "{{ value_json.cell_max_v if value_json.cell_max_v > 0 else None }}",
+                  (e + ",\"unit_of_meas\":\"V\",\"dev_cla\":\"voltage\"").c_str());
     publishEntity("binary_sensor", "gen_no_start", "Generator did not start",
                   "{{ 'ON' if value_json.gen_no_start else 'OFF' }}", (e + ",\"dev_cla\":\"problem\"").c_str());
     publishEntity("binary_sensor", "soc_frozen", "Battery SOC frozen",
@@ -110,11 +133,12 @@ void HaRelays::publishDiscovery() {
         publishEntity("select", "season_mode", "Season mode", "{{ value_json.season_mode }}",
                       (String("\"cmd_t\":\"") + kSeasonSetTopic +
                        "\",\"options\":[\"auto\",\"summer\",\"shoulder\",\"winter\"]").c_str());
-        publishEntity("switch", "aux1_sw", "Relay 3 switch", "{{ value_json.aux1 }}",
-                      (String("\"cmd_t\":\"") + kAux1SetTopic +
-                       "\",\"pl_on\":\"on\",\"pl_off\":\"off\",\"stat_on\":\"on\",\"stat_off\":\"off\"").c_str());
+        clearEntity(_mqtt, "sensor", "cherokee_mode");
+        publishEntity("select", "cherokee_mode", "Cherokee mode", "{{ value_json.cherokee_mode }}",
+                      (String("\"cmd_t\":\"") + kCherokeeSetTopic + "\",\"options\":[\"auto\",\"on\",\"off\"]").c_str());
     } else {
-        clearEntity(_mqtt, "switch", "aux1_sw");
+        clearEntity(_mqtt, "select", "cherokee_mode");
+        publishEntity("sensor", "cherokee_mode", "Cherokee mode", "{{ value_json.cherokee_mode }}", e.c_str());
         clearEntity(_mqtt, "select", "gen_mode");
         clearEntity(_mqtt, "select", "season_mode");
         clearEntity(_mqtt, "select", "heavy_mode");
@@ -136,6 +160,7 @@ void HaRelays::onMqttConnected() {
     // Read-only health signals: safe without TLS.
     _mqtt->subscribe(kHeartbeatTopic);
     _mqtt->subscribe(kHaStatusTopic);
+    _mqtt->subscribe(kHintTopic);
 #ifdef CMD_SECRET
     _mqtt->subscribe(kSignedCmdTopic);
 #endif
@@ -143,7 +168,7 @@ void HaRelays::onMqttConnected() {
         _mqtt->subscribe(kGenModeSetTopic);
         _mqtt->subscribe(kSeasonSetTopic);
         _mqtt->subscribe(kHeavyModeSetTopic);
-        _mqtt->subscribe(kAux1SetTopic);
+        _mqtt->subscribe(kCherokeeSetTopic);
         _mqtt->subscribe(kAlertAckTopic);
     }
     Log.printf("[HA relays] discovery published, commands %s\n",
@@ -153,17 +178,22 @@ void HaRelays::onMqttConnected() {
 
 void HaRelays::publishState() {
     // Heap, not stack: the ESP8266 stack is only 4 KB.
-    DynamicJsonDocument doc(1536);
-    _relays.fillStatus(doc.to<JsonObject>());
-    String buf;
-    serializeJson(doc, buf);
-    _mqtt->publish(kStateTopic, (const uint8_t*)buf.c_str(), buf.length(), false);
+    DynamicJsonDocument doc(2048);
+    _relays.fillStatus(doc.to<JsonObject>(), false);
+    // Streamed into the MQTT packet: no String copy of ~1.4 KB.
+    if (_mqtt->beginPublish(kStateTopic, measureJson(doc), false)) {
+        ChunkPrint out(*_mqtt);
+        serializeJson(doc, out);
+        out.done();
+        _mqtt->endPublish();
+    }
     _lastPublishMs = millis();
     _lastChange = _relays.changeCounter();
 }
 
 bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned int length) {
     if (strcmp(topic, kHeartbeatTopic) == 0) { alerts.onHaHeartbeat(); return true; }
+    if (strcmp(topic, kHintTopic) == 0) { _relays.onHint((const char*)payload, length); return true; }
     if (strcmp(topic, kSignedCmdTopic) == 0) { handleSignedCommand(payload, length); return true; }
     if (strcmp(topic, kHaStatusTopic) == 0) {
         alerts.onHaStatus(length >= 6 && memcmp(payload, "online", 6) == 0);
@@ -182,16 +212,17 @@ bool HaRelays::handleMessage(const char* topic, const uint8_t* payload, unsigned
     bool gen = strcmp(topic, kGenModeSetTopic) == 0;
     bool season = strcmp(topic, kSeasonSetTopic) == 0;
     bool heavy = strcmp(topic, kHeavyModeSetTopic) == 0;
-    bool aux1 = strcmp(topic, kAux1SetTopic) == 0;
-    if (!gen && !season && !heavy && !aux1) return false;
+    bool ch = strcmp(topic, kCherokeeSetTopic) == 0;
+    if (!gen && !season && !heavy && !ch) return false;
     if (!_commandsEnabled) return true;   // never act without TLS
 
     String v;
     for (unsigned i = 0; i < length; i++) v += (char)payload[i];
     v.trim();
 
-    if (aux1) {
-        if (v == "on" || v == "off") _relays.setAux1(v == "on", "HA");
+    if (ch) {
+        cherokee::Mode m;
+        if (cherokee::Controller::parseMode(v.c_str(), m)) _relays.setCherokeeMode(m, "HA");
     } else if (heavy) {
         HeavyMode m;
         if (RelayController::parseHeavyMode(v, m)) _relays.setHeavyMode(m, "HA");
@@ -241,8 +272,12 @@ void HaRelays::handleSignedCommand(const uint8_t* payload, unsigned int length) 
     } else if (c == "gen_mode") {
         GenMode m;
         if (RelayController::parseGenMode(a, m)) _relays.setGenMode(m, "VPS");
+    } else if (c == "cherokee_mode") {
+        cherokee::Mode m;
+        if (cherokee::Controller::parseMode(a.c_str(), m)) _relays.setCherokeeMode(m, "VPS");
     } else if (c == "aux1") {
-        if (a == "on" || a == "off") _relays.setAux1(a == "on", "VPS");
+        // Old bridge: "aux1 on" closed relay 3, which now means chargers OFF.
+        Log.println("[CMD] 'aux1' is obsolete (relay 3 = Cherokee now), use cherokee_mode");
     }
     publishState();
 #else

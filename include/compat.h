@@ -9,6 +9,32 @@
 // -----------------------------------------------------------------------------
 #include <Arduino.h>
 
+// Collects small writes into 128-byte chunks. ArduinoJson writes JSON a few
+// bytes at a time; straight into a socket that is hundreds of tiny TCP
+// writes, and into a String first it is a second copy of the whole document
+// — on the ESP8266 that copy is what ran the heap dry. Call done() at the end.
+class ChunkPrint : public Print {
+public:
+    explicit ChunkPrint(Print& out) : _out(out) {}
+    size_t write(uint8_t c) override {
+        _b[_n++] = c;
+        if (_n == sizeof(_b)) done();
+        return 1;
+    }
+    size_t write(const uint8_t* p, size_t n) override {
+        for (size_t i = 0; i < n; i++) write(p[i]);
+        return n;
+    }
+    void done() {
+        if (_n) _out.write(_b, _n);
+        _n = 0;
+    }
+private:
+    Print&  _out;
+    uint8_t _b[128];
+    size_t  _n = 0;
+};
+
 #if defined(ESP32)
   #include <WiFi.h>
   #include <WebServer.h>
