@@ -4,3 +4,15 @@
 .vscode/launch.json
 .vscode/ipch
 include/secrets.h
+
+# Environment files
+.env
+.env.*
+!.env.example
+scripts/.env
+scripts/.env.*
+
+
+# Flash dumps contain WiFi passwords
+backups/
+__pycache__/

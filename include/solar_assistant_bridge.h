@@ -5,6 +5,8 @@
 #include <ArduinoJson.h>
 #include "tuya_cloud_client.h"
 #include "solar_assistant_mapping.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 class SolarAssistantBridge {
 public:
@@ -22,6 +24,9 @@ private:
     };
     // We'll use a map or array based on virtualDeviceMap
     PendingCmd _cache[virtualMapSize];
+    // handleMqttMessage() runs in the main loop, processPendingCommands() in
+    // the Tuya task.
+    SemaphoreHandle_t _mutex;
 };
 
 #endif

@@ -1,4 +1,5 @@
 #include "tuya_cloud_client.h"
+#include "app_log.h"
 #include <mbedtls/md.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -72,7 +73,7 @@ bool TuyaCloudClient::fetchAccessToken() {
 
     int code = http.GET();
     if (code != 200) {
-        Serial.printf("[Tuya] Token fetch HTTP %d\n", code);
+        Log.printf("[Tuya] Token fetch HTTP %d\n", code);
         http.end();
         // Invalidate cached token on failure to force retry next call.
         _accessToken = "";
@@ -86,7 +87,7 @@ bool TuyaCloudClient::fetchAccessToken() {
     http.end();
 
     if (err) {
-        Serial.printf("[Tuya] Token parse failed: %s\n", err.c_str());
+        Log.printf("[Tuya] Token parse failed: %s\n", err.c_str());
         _accessToken = "";
         _tokenExpiresAtMs = 0;
         return false;
@@ -94,7 +95,7 @@ bool TuyaCloudClient::fetchAccessToken() {
     if (!(doc["success"] | false)) {
         int codeErr = doc["code"] | 0;
         const char* msg = doc["msg"] | "";
-        Serial.printf("[Tuya] Token API error code=%d msg=%s\n", codeErr, msg);
+        Log.printf("[Tuya] Token API error code=%d msg=%s\n", codeErr, msg);
         _accessToken = "";
         _tokenExpiresAtMs = 0;
         return false;
@@ -104,7 +105,7 @@ bool TuyaCloudClient::fetchAccessToken() {
     // expire_time comes in seconds (Tuya docs: 7200s = 2h typical).
     uint32_t expireSec = doc["result"]["expire_time"] | 7200;
     _tokenExpiresAtMs = nowMs + (uint64_t)expireSec * 1000ULL;
-    Serial.printf("[Tuya] Token acquired, expires in %us\n", (unsigned)expireSec);
+    Log.printf("[Tuya] Token acquired, expires in %us\n", (unsigned)expireSec);
     return true;
 }
 
@@ -136,7 +137,7 @@ bool TuyaCloudClient::reportDeviceDPs(const String& deviceId, const String& dpCo
 
 bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, const String& valueStr, bool isStringValue) {
     if (!ensureToken()) {
-        Serial.println("[Tuya] Failed to get access token before request");
+        Log.println("[Tuya] Failed to get access token before request");
         return false;
     }
 
@@ -180,7 +181,7 @@ bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, 
     String url = String(_baseUrl) + path;
 
     if (!http.begin(secureClient, url)) {
-        Serial.println("[Tuya] HTTP connection failed");
+        Log.println("[Tuya] HTTP connection failed");
         return false;
     }
 
@@ -198,7 +199,7 @@ bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, 
     http.end();
 
     if (httpResponseCode != 200) {
-        Serial.printf("[Tuya] POST %s -> HTTP %d\n", path.c_str(), httpResponseCode);
+        Log.printf("[Tuya] POST %s -> HTTP %d\n", path.c_str(), httpResponseCode);
         return false;
     }
 
@@ -209,14 +210,14 @@ bool TuyaCloudClient::sendRequest(const String& deviceId, const String& dpCode, 
     if (!success) {
         int errCode = resDoc["code"] | 0;
         const char* msg = resDoc["msg"] | "";
-        Serial.printf("[Tuya] API error code=%d msg=%s\n", errCode, msg);
+        Log.printf("[Tuya] API error code=%d msg=%s\n", errCode, msg);
         // 1010 token invalid, 1011 token expired — invalidate cache so the
         // next call re-fetches. We don't retry inline: caller loop will hit
         // us again and by then ensureToken() sees the empty cache.
         if (errCode == 1010 || errCode == 1011) {
             _accessToken = "";
             _tokenExpiresAtMs = 0;
-            Serial.println("[Tuya] Token invalidated, will refresh on next call");
+            Log.println("[Tuya] Token invalidated, will refresh on next call");
         }
     }
 
@@ -292,14 +293,14 @@ String TuyaCloudClient::getDeviceProperties(const String& deviceId) {
     http.end();
 
     if (httpResponseCode != 200) {
-        Serial.printf("[Tuya] GET %s -> HTTP %d\n", path.c_str(), httpResponseCode);
+        Log.printf("[Tuya] GET %s -> HTTP %d\n", path.c_str(), httpResponseCode);
         return "";
     }
 
     // Cheap peek: if the body says token expired, invalidate the cache so the
     // next call refreshes. We don't retry inline — the poll loop will do it.
     if (resp.indexOf("\"code\":1010") >= 0 || resp.indexOf("\"code\":1011") >= 0) {
-        Serial.println("[Tuya] response indicates token invalid/expired, clearing cache");
+        Log.println("[Tuya] response indicates token invalid/expired, clearing cache");
         _accessToken = "";
         _tokenExpiresAtMs = 0;
         return "";

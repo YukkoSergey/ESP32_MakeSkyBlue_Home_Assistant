@@ -1,0 +1,59 @@
+# Generator and heavy-load control for the shed board, from Home Assistant.
+#
+# The board has no TLS to the broker, so it never takes commands from HA
+# directly. HA calls dacha-bridge over the cluster-internal Service, and the
+# bridge sends the same HMAC-signed command Telegram uses, then waits for the
+# board's state to confirm it (up to ~20 s). The bridge also mirrors every HA
+# command to the Telegram chat.
+#
+# Needs in /config/secrets.yaml:
+#   dacha_bridge_auth: "Bearer <HA_CMD_TOKEN from the dacha-bridge-env Secret>"
+# and in configuration.yaml:
+#   homeassistant:
+#     packages: !include_dir_named packages
+
+rest_command:
+  dacha_board_cmd:
+    url: http://dacha-bridge.homeassistant.svc.cluster.local:8080/cmd
+    method: POST
+    headers:
+      Authorization: !secret dacha_bridge_auth
+    content_type: application/json
+    payload: '{"c": "{{ c }}", "a": "{{ a }}"}'
+    timeout: 30
+
+script:
+  dacha_board_cmd:
+    alias: Дача — команда платі
+    description: >-
+      gen_mode = auto / run / off, heavy_mode = auto / on / off, aux1 = on / off.
+      Якщо плата не підтвердила — з'явиться сповіщення в HA.
+    mode: queued
+    icon: mdi:engine
+    fields:
+      c:
+        description: gen_mode або heavy_mode
+        example: gen_mode
+      a:
+        description: auto / run / off (генератор), auto / on / off (навантаження)
+        example: auto
+    sequence:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: dacha_board_cmd
+      - action: rest_command.dacha_board_cmd
+        data:
+          c: "{{ c }}"
+          a: "{{ a }}"
+        response_variable: r
+      - if:
+          - condition: template
+            value_template: "{{ r.status != 200 }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: dacha_board_cmd
+              title: Дача — команду не виконано
+              message: >-
+                {{ r.content.text if r.content is mapping and 'text' in r.content
+                   else 'Міст відповів ' ~ r.status }}

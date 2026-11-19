@@ -1,4 +1,5 @@
 #include "solar_manager_protocol.h"
+#include "app_log.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
 
@@ -42,14 +43,14 @@ void SolarManagerDevice::onMqttConnected() {
     _mqtt->subscribe(topic("host/#").c_str());
     _onlinePublished = false;   // force publishOnline on next tick
     publishOnline();
-    Serial.printf("[SM %s] connected, subscribed to config/control/host\n", _serial);
+    Log.printf("[SM %s] connected, subscribed to config/control/host\n", _serial);
 }
 
 void SolarManagerDevice::publishOnline() {
     if (!_mqtt || !_mqtt->connected()) return;
     _mqtt->publish(topic("online").c_str(), _firmwareVersion);
     _onlinePublished = true;
-    Serial.printf("[SM %s] online -> %s\n", _serial, _firmwareVersion);
+    Log.printf("[SM %s] online -> %s\n", _serial, _firmwareVersion);
 }
 
 void SolarManagerDevice::publishDiagnostics() {
@@ -166,7 +167,7 @@ void SolarManagerDevice::tick(const MpptState& state) {
 void SolarManagerDevice::handleConfig(const uint8_t* payload, unsigned int length) {
     StaticJsonDocument<512> doc;
     if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
-        Serial.printf("[SM %s] /config: bad JSON\n", _serial);
+        Log.printf("[SM %s] /config: bad JSON\n", _serial);
         return;
     }
     JsonArrayConst segs = doc["segments"].as<JsonArrayConst>();
@@ -182,7 +183,7 @@ void SolarManagerDevice::handleConfig(const uint8_t* payload, unsigned int lengt
         n++;
     }
     _segmentCount = n;
-    Serial.printf("[SM %s] /config: %u segments\n", _serial, (unsigned)n);
+    Log.printf("[SM %s] /config: %u segments\n", _serial, (unsigned)n);
 }
 
 void SolarManagerDevice::handleControlCmd(const uint8_t* payload, unsigned int length) {
@@ -192,7 +193,7 @@ void SolarManagerDevice::handleControlCmd(const uint8_t* payload, unsigned int l
     //   fn 6:  [slave][6][addr:2][val:2]         single holding register
     //   fn 16: [slave][16][addr:2][count:2][values...]
     if (length < 6) {
-        Serial.printf("[SM %s] /control/cmd: too short (%u B)\n", _serial, length);
+        Log.printf("[SM %s] /control/cmd: too short (%u B)\n", _serial, length);
         return;
     }
     uint8_t slave = payload[0];
@@ -201,16 +202,16 @@ void SolarManagerDevice::handleControlCmd(const uint8_t* payload, unsigned int l
     uint16_t v    = (payload[4] << 8) | payload[5];
 
     if (fn == 5) {
-        Serial.printf("[SM %s] WRITE DISABLED: fn5 coil slave=%u addr=0x%04X -> %s\n",
+        Log.printf("[SM %s] WRITE DISABLED: fn5 coil slave=%u addr=0x%04X -> %s\n",
                       _serial, slave, addr, v == 0xFF00 ? "ON" : "OFF");
     } else if (fn == 6) {
-        Serial.printf("[SM %s] WRITE DISABLED: fn6 holding slave=%u addr=0x%04X val=%u\n",
+        Log.printf("[SM %s] WRITE DISABLED: fn6 holding slave=%u addr=0x%04X val=%u\n",
                       _serial, slave, addr, v);
     } else if (fn == 16) {
-        Serial.printf("[SM %s] WRITE DISABLED: fn16 multi slave=%u addr=0x%04X count=%u\n",
+        Log.printf("[SM %s] WRITE DISABLED: fn16 multi slave=%u addr=0x%04X count=%u\n",
                       _serial, slave, addr, v);
     } else {
-        Serial.printf("[SM %s] WRITE DISABLED: unknown fn=%u\n", _serial, fn);
+        Log.printf("[SM %s] WRITE DISABLED: unknown fn=%u\n", _serial, fn);
     }
 }
 
@@ -220,10 +221,10 @@ void SolarManagerDevice::handleControlLed(const uint8_t* payload, unsigned int l
     } else if (length == 3 && payload[0] == 'o' && payload[1] == 'f' && payload[2] == 'f') {
         _ledOn = false;
     } else {
-        Serial.printf("[SM %s] /control/led: unrecognized payload (%u B)\n", _serial, length);
+        Log.printf("[SM %s] /control/led: unrecognized payload (%u B)\n", _serial, length);
         return;
     }
-    Serial.printf("[SM %s] LED -> %s\n", _serial, _ledOn ? "on" : "off");
+    Log.printf("[SM %s] LED -> %s\n", _serial, _ledOn ? "on" : "off");
     publishDiagnostics(); // reflect change immediately
 }
 
@@ -241,16 +242,16 @@ bool SolarManagerDevice::handleMessage(const char* topicIn, const uint8_t* paylo
     } else if (strcmp(sub, "control/led") == 0) {
         handleControlLed(payload, length);
     } else if (strcmp(sub, "control/restart") == 0) {
-        Serial.printf("[SM %s] /control/restart — DISABLED IN MVP\n", _serial);
+        Log.printf("[SM %s] /control/restart — DISABLED IN MVP\n", _serial);
     } else if (strcmp(sub, "control/reconfig") == 0) {
-        Serial.printf("[SM %s] /control/reconfig — resetting segments, republishing online\n", _serial);
+        Log.printf("[SM %s] /control/reconfig — resetting segments, republishing online\n", _serial);
         resetDefaultSegments();
         publishOnline();
     } else if (strcmp(sub, "host/heartbeat") == 0) {
         _lastHeartbeatMs = millis();
     } else {
         // subscribed via /control/# and /host/# but not one of the above
-        Serial.printf("[SM %s] unhandled subtopic '%s' (%u B)\n", _serial, sub, length);
+        Log.printf("[SM %s] unhandled subtopic '%s' (%u B)\n", _serial, sub, length);
     }
     return true;
 }
