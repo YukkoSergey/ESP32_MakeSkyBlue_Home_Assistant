@@ -8,6 +8,8 @@ volatile uint16_t g_wifiDrops = 0;
 
 String compatLastCrash() { return String(); }
 void compatGuardTripped(uint32_t, const uint8_t*, size_t) {}
+void compatSaveAlive(uint8_t, int, bool, bool, uint32_t, uint8_t) {}
+String compatLastAlive() { return String(); }
 #include <mbedtls/md.h>
 
 String compatHmacSha256Hex(const String& key, const String& msg) {
@@ -102,6 +104,36 @@ static String lastGuardHit() {
     s += " | ascii: ";
     for (uint8_t b : g.bytes) s += (b >= 32 && b < 127) ? (char)b : '.';
     return s;
+}
+
+// Last known state, refreshed once a minute (and right before a network
+// watchdog restart). After a reset by the button or the watchdog it tells
+// what the board was doing; a power cut wipes it.
+struct AliveRecord {
+    uint32_t magic, uptimeS, wifiStatus;
+    int32_t  rssi;
+    uint32_t lanOk, haOk, wifiDrops, netDeadS, heap, crumb, why;
+};
+static constexpr uint32_t kAliveMagic = 0xDAC4A11E;
+static constexpr uint32_t kAliveSlot  = 100;
+
+void compatSaveAlive(uint8_t wifiStatus, int rssi, bool lan, bool ha, uint32_t netDeadS, uint8_t why) {
+    AliveRecord a{kAliveMagic, (uint32_t)(millis() / 1000), wifiStatus, rssi, lan, ha, g_wifiDrops,
+                  netDeadS, ESP.getFreeHeap(), g_crumb, why};
+    ESP.rtcUserMemoryWrite(kAliveSlot, (uint32_t*)&a, sizeof(a));
+}
+
+String compatLastAlive() {
+    AliveRecord a;
+    if (!ESP.rtcUserMemoryRead(kAliveSlot, (uint32_t*)&a, sizeof(a)) || a.magic != kAliveMagic) return String();
+    uint32_t zero = 0;
+    ESP.rtcUserMemoryWrite(kAliveSlot, &zero, sizeof(zero));
+    char buf[200];
+    snprintf(buf, sizeof(buf), "%s: up %us, wifi status %u, rssi %d, mqtt lan %u ha %u, no broker for %us, "
+             "wifi drops %u, heap %u, loop phase %u",
+             a.why == 1 ? "NETWORK WATCHDOG restart" : "last state before reset",
+             a.uptimeS, a.wifiStatus, (int)a.rssi, a.lanOk, a.haOk, a.netDeadS, a.wifiDrops, a.heap, a.crumb);
+    return String(buf);
 }
 
 String compatLastCrash() {

@@ -114,6 +114,12 @@ extern volatile uint16_t g_wifiDrops;
 // zone, and which zone) and reboot cleanly. ESP8266 only; no-op elsewhere.
 void compatGuardTripped(uint32_t zone, const uint8_t* bytes, size_t n);
 
+// Last-known-state record in RTC memory (ESP8266): saved every minute and
+// before a network-watchdog restart; why = 0 periodic, 1 network watchdog.
+// compatLastAlive() returns it once (empty if none, e.g. after a power cut).
+void compatSaveAlive(uint8_t wifiStatus, int rssi, bool lan, bool ha, uint32_t netDeadS, uint8_t why);
+String compatLastAlive();
+
 // HMAC-SHA256 as lowercase hex (signed commands from the VPS bridge).
 String compatHmacSha256Hex(const String& key, const String& msg);
 

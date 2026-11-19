@@ -182,8 +182,11 @@ static const WifiNetwork kWifiNetworks[] = {
 #endif
 };
 constexpr size_t   kWifiNetworkCount = sizeof(kWifiNetworks) / sizeof(kWifiNetworks[0]);
-constexpr uint32_t kWifiAttemptMs = 10000;
-constexpr uint32_t kWifiMaxRetryMs = 20000;
+// At -80..-85 dBm association + DHCP can take well over 10 s; restarting
+// every 10-20 s (rescan, begin) kept the board off the network for 5 min
+// after a boot on 2026-11-19, and probably for 2 h that night.
+constexpr uint32_t kWifiAttemptMs = 30000;
+constexpr uint32_t kWifiMaxRetryMs = 45000;
 static size_t wifiNetworkIdx = 0;
 static bool   wifiWasConnected = false;
 
@@ -240,6 +243,10 @@ static void kickWifi() {
         WiFi.mode(WIFI_STA);
         WiFi.hostname(kHostname);
         WiFi.setSleepMode(WIFI_NONE_SLEEP);   // mains-powered; sleep hurts a weak link
+        // Weak link in the shed: full TX power, and 802.11g — 11n's high
+        // rates are useless at -80 dBm and the ESP8266 hears 11b/g better.
+        WiFi.setOutputPower(20.5f);
+        WiFi.setPhyMode(WIFI_PHY_MODE_11G);
         wifiInit = true;
     }
     WiFi.disconnect(false);
@@ -364,7 +371,12 @@ void setup() {
                kFirmwareBuild, compatResetName(compatResetKind()));
 
     String crash = compatLastCrash();
+    String alive = compatLastAlive();   // read (and clear) either way
     if (crash.length()) Log.printf("[Crash] previous reset: %s\n", crash.c_str());
+    else if (alive.length() && compatResetKind() != ResetKind::Software) {
+        Log.printf("[Boot] %s\n", alive.c_str());
+        crash = alive;   // into the boot message
+    }
 
     // Relays first: restore their state before anything slow happens.
     relays.begin(settings::load());
@@ -406,6 +418,28 @@ void loop() {
         WiFi.disconnect(false);
         wifiUp = false;
         lanOk = haOk = false;
+    }
+
+    // Network watchdog: no broker at all for 10 min, WiFi up or not (seen
+    // 2026-11-19: the board fell off the network for 2 h until reset by
+    // hand). Nothing to lose: without data the heavy load is already off and
+    // the Cherokee already on, and the boot settle time keeps the contactor
+    // still. The reason survives in RTC memory for the boot message.
+    static uint32_t noBrokerSinceMs = 0;
+    static uint32_t lastAliveMs = 0;
+    if (lanOk || haOk) noBrokerSinceMs = 0;
+    else if (!noBrokerSinceMs) noBrokerSinceMs = millis();
+    uint32_t deadS = noBrokerSinceMs ? (millis() - noBrokerSinceMs) / 1000 : 0;
+    if (millis() - lastAliveMs > 60000) {
+        lastAliveMs = millis();
+        compatSaveAlive((uint8_t)WiFi.status(), WiFi.RSSI(), lanOk, haOk, deadS, 0);
+    }
+    if (deadS > 10 * 60) {
+        Log.printf("[WiFi] no broker for %u min (wifi status %d, rssi %d) -> restarting the board\n",
+                   (unsigned)(deadS / 60), (int)WiFi.status(), WiFi.RSSI());
+        compatSaveAlive((uint8_t)WiFi.status(), WiFi.RSSI(), lanOk, haOk, deadS, 1);
+        delay(100);
+        ESP.restart();
     }
     g_crumb = 5; if (lanOk) mqttLan.loop();
     checkGuards();
