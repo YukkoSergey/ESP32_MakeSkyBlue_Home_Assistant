@@ -15,7 +15,8 @@ shouldn't do:
      (which Tuya scenes act on) drifted from the board's SOC or stopped updating.
   6. Winter solar ballast: when the battery is full and the sun is still
      there, Masha's heater (Tuya plug; ~560 W at minimum, own thermostat) soaks up what the MPPTs
-     would otherwise throttle away. On time and energy are counted per
+     would otherwise throttle away. Decided by PV voltage + SOC, not PV power
+     (throttled at full SOC): on at SOC 100%, off once SOC drops 0.5 kWh. On time and energy are counted per
      heating season and shown in HA (MQTT discovery).
   7. Electricity: the meter's T1/T2 registers -> HA (MQTT discovery); the
      monthly report HA builds (dacha_bridge/electricity_report) -> Telegram.
@@ -92,15 +93,24 @@ BALLAST_ID = E("BALLAST_ID", "bfb828322fc75c06d6ahl8")    # Masha Room heater pl
 METER_ID = E("METER_ID", "bfa20bdae7df3d38bbu0uc")        # 3-phase meter (chargers on A, B)
 BALLAST_SEASON = ((10, 15), (3, 15))   # heating season, (month, day) from / to
 BALLAST_HOURS = (9, 16)                # local time window
-BALLAST_SOC_ON, BALLAST_SOC_OFF = 99, 96
-BALLAST_PV_MIN = 100                   # W, sun is up; a full battery makes the MPPTs throttle PV down to ~load
-BALLAST_BAT_OK = -50                   # W, battery not discharging (to switch on)
-BALLAST_BAT_DRAIN = -250               # W, heater is eating the battery
+# At a full battery the MPPTs throttle PV down to what is consumed, so PV power
+# says nothing about the sun that is there. Decide by SOC instead (user, 2026-11-19):
+# sun on the fields (PV voltage) + SOC 100% + small house load -> heater on; it
+# stays on while SOC stays above 100% minus the ballast's reserve (0.5 kWh of a
+# ~15 kWh battery = 3.3 pp). Only an SOC drop below that means the sun can't carry it.
+BALLAST_SOC_ON = 100
+BALLAST_BATTERY_KWH = float(E("BALLAST_BATTERY_KWH", "15"))
+BALLAST_RESERVE_KWH = float(E("BALLAST_RESERVE_KWH", "0.5"))
+BALLAST_SOC_OFF = 100 - BALLAST_RESERVE_KWH / BALLAST_BATTERY_KWH * 100   # 96.7 %: off below this
+BALLAST_SUN_V = 80                     # V, PV voltage on a field = sun is up (battery ~52 V)
+BALLAST_SUN_FIELDS = 2                 # of the inverter PV + MSB1..3 fields
+BALLAST_LOAD_MAX = 300                 # W, house load (without the heater) to switch on
+BALLAST_GRID_MAX = 300                 # W, inverter drawing this from the grid = heater fed by the grid
 BALLAST_CHARGERS_KW = 0.1              # phase A+B, Cherokee chargers idle
 BALLAST_ON_DELAY_S = 5 * 60            # conditions must hold this long
-BALLAST_DRAIN_S = 3 * 60
+BALLAST_NOSUN_S = 5 * 60               # PV voltage gone this long -> off
+BALLAST_GRID_S = 3 * 60
 BALLAST_MIN_OFF_S = 10 * 60
-BALLAST_BACKOFF_S = (30 * 60, 60 * 60, 120 * 60)   # after attempts the sun couldn't carry
 
 
 # =============================================================================
@@ -475,9 +485,9 @@ class Bridge:
         self.bl_power = 0.0
         self.bl_changed = 0.0        # last on/off by us
         self.bl_ok_since = 0.0
-        self.bl_drain_since = 0.0
+        self.bl_nosun_since = 0.0
+        self.bl_grid_since = 0.0
         self.bl_backoff_until = 0.0
-        self.bl_fails = 0
         self.bl_chargers_kw = None
         self.bl_reason = "старт"
         self.bl_last_off = ""
@@ -866,7 +876,7 @@ class Bridge:
             log.warning("ballast: switch %s failed", on)
             return False
         self.bl_on, self.bl_owned, self.bl_changed, self.bl_reason = on, on, now, reason
-        self.bl_ok_since = self.bl_drain_since = 0.0
+        self.bl_ok_since = self.bl_nosun_since = self.bl_grid_since = 0.0
         if not on:
             self.bl_last_off = reason
         if on:
@@ -881,7 +891,7 @@ class Bridge:
             self.bl.update(season=season, season_s=0.0, season_wh=0.0, starts=0)
         if self.bl.get("date") != today:
             self.bl.update(date=today, today_s=0.0, today_wh=0.0)
-            self.bl_fails, self.bl_backoff_until = 0, 0.0
+            self.bl_backoff_until = 0.0
 
         if read_devices:
             st = self.tuya.status(BALLAST_ID)
@@ -912,48 +922,63 @@ class Bridge:
 
         try:
             soc = float(self.sa_values["battery_percentage"])
-            bat = float(self.sa_values["battery_load"])
-            pv = float(self.sa_values["pv_power"])
+            load = float(self.sa_values["load_power"])
+            grid = float(self.sa_values.get("grid_load") or 0)
             sa_ok = now - self.sa_last < 5 * 60
         except (KeyError, ValueError):
-            soc = bat = pv = 0.0
+            soc = load = grid = 0.0
             sa_ok = False
+        # sun = PV voltage on the fields (the MSBs; the inverter's PV voltage isn't
+        # forwarded, its PV power > 0 counts as voltage there)
+        volts = [m.fc4.get(0x07, 0) / 10 for m in self.msbs if m.valid]
+        try:
+            inv_sun = float(self.sa_values.get("pv_power") or 0) > 20
+        except ValueError:
+            inv_sun = False
+        sun_fields = sum(v >= BALLAST_SUN_V for v in volts) + inv_sun
+        sun = sun_fields >= BALLAST_SUN_FIELDS
+        self.bl_nosun_since = 0.0 if sun else (self.bl_nosun_since or now)
+        self.bl_grid_since = (self.bl_grid_since or now) if grid > BALLAST_GRID_MAX else 0.0
+        vtxt = "/".join(f"{v:.0f}" for v in volts)
         window = self.ballast_in_season(loc) and BALLAST_HOURS[0] <= loc.hour < BALLAST_HOURS[1]
         chargers = self.bl_chargers_kw
 
         if self.bl_owned:
-            self.bl_drain_since = (self.bl_drain_since or now) if bat < BALLAST_BAT_DRAIN else 0.0
             off = ""
             if not window:
                 off = "поза вікном"
             elif not sa_ok:
                 off = "немає даних Solar Assistant"
-            elif soc <= BALLAST_SOC_OFF:
-                off = f"SOC {soc:.0f}%"
+            elif soc < BALLAST_SOC_OFF:
+                off = f"сонця не вистачає: SOC {soc:.0f}% (< {BALLAST_SOC_OFF:.1f}%)"
             elif chargers is not None and chargers > 3 * BALLAST_CHARGERS_KW:
                 off = f"увімкнулись Cherokee ({chargers:.2f} кВт)"
-            elif self.bl_drain_since and now - self.bl_drain_since >= BALLAST_DRAIN_S:
-                off = f"сонця не вистачає (батарея {bat:.0f} Вт)"
-            ran = now - self.bl_changed
-            if off and self.ballast_switch(False, f"вимкнено {datetime.now(TZ):%H:%M}: {off}", now) and (off.startswith("сонця") or off.startswith("SOC")):
-                if ran < 20 * 60:   # the sun couldn't carry it: wait longer each time today
-                    self.bl_fails += 1
-                    pause = BALLAST_BACKOFF_S[min(self.bl_fails, len(BALLAST_BACKOFF_S)) - 1]
-                    self.bl_backoff_until = now + pause
-                    self.bl_reason = f"{off} — пауза {pause // 60} хв"
-                else:
-                    self.bl_fails = 0
+            elif self.bl_grid_since and now - self.bl_grid_since >= BALLAST_GRID_S:
+                off = f"інвертор бере з мережі {grid:.0f} Вт"
+            elif self.bl_nosun_since and now - self.bl_nosun_since >= BALLAST_NOSUN_S:
+                off = f"сонце зайшло (PV {vtxt} В)"
+            if off:
+                self.ballast_switch(False, f"вимкнено {datetime.now(TZ):%H:%M}: {off}", now)
+            else:
+                self.bl_reason = f"працює: SOC {soc:.0f}%, вимкну нижче {BALLAST_SOC_OFF:.1f}%"
         elif not self.bl_on:
-            ok = (window and sa_ok and soc >= BALLAST_SOC_ON and bat >= BALLAST_BAT_OK and pv >= BALLAST_PV_MIN
-                  and chargers is not None and chargers < BALLAST_CHARGERS_KW)
-            self.bl_ok_since = (self.bl_ok_since or now) if ok else 0.0
-            if (ok and now - self.bl_ok_since >= BALLAST_ON_DELAY_S and now - self.bl_changed >= BALLAST_MIN_OFF_S
-                    and now >= self.bl_backoff_until):
-                self.ballast_switch(True, f"надлишок сонця: PV {pv:.0f} Вт, SOC {soc:.0f}%", now)
-            elif now >= self.bl_backoff_until and not window:
-                self.bl_reason = "поза вікном (сезон, 09–16)"
-            elif now >= self.bl_backoff_until and not ok:
-                self.bl_reason = "чекаю надлишку" + (f" · {self.bl_last_off}" if self.bl_last_off else "")
+            why = ("" if window else "поза вікном (сезон, 09–16)") or \
+                  ("" if sa_ok else "немає даних Solar Assistant") or \
+                  ("" if soc >= BALLAST_SOC_ON else f"SOC {soc:.0f}% < {BALLAST_SOC_ON}%") or \
+                  ("" if sun else f"немає сонця (PV {vtxt} В)") or \
+                  ("" if load <= BALLAST_LOAD_MAX else f"навантаження {load:.0f} Вт") or \
+                  ("" if grid <= BALLAST_GRID_MAX else f"інвертор бере з мережі {grid:.0f} Вт") or \
+                  ("" if chargers is not None and chargers < BALLAST_CHARGERS_KW else "працюють Cherokee")
+            self.bl_ok_since = 0.0 if why else (self.bl_ok_since or now)
+            if not why and now - self.bl_ok_since >= BALLAST_ON_DELAY_S and now - self.bl_changed >= BALLAST_MIN_OFF_S \
+                    and now >= self.bl_backoff_until:
+                self.ballast_switch(True, f"сонце є (PV {vtxt} В), SOC {soc:.0f}%, навантаження {load:.0f} Вт", now)
+            elif now < self.bl_backoff_until:
+                pass   # keeps the "switched off externally" reason
+            elif why:
+                self.bl_reason = f"чекаю: {why}" + (f" · {self.bl_last_off}" if self.bl_last_off else "")
+            else:
+                self.bl_reason = "умови виконані, вмикаю через 5 хв"
         else:
             self.bl_reason = "увімкнено вручну — не чіпаю"
 
