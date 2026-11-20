@@ -1,4 +1,5 @@
 #include "cherokee.h"
+#include <algorithm>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -323,7 +324,8 @@ void Controller::update(const Inputs& in) {
         logf(CHF("[Cherokee] cell %.3f V >= cap %.2f V: battery counts as full"), in.cellMaxV, _cfg.cellCapV);
     }
     if (_full && (_cfg.cellCapV <= 0 ||
-                  (trusted && in.soc <= P.onSoc && (!in.cellFresh || in.cellMaxV <= kFullClearCellV)))) {
+                  (trusted && in.soc <= std::max<int>(P.onSoc, P.offSoc - kFullClearDrop) &&
+                   (!in.cellFresh || in.cellMaxV <= kFullClearCellV)))) {
         _full = false;
         logf(CHF("[Cherokee] 'full after cell cap' cleared (SOC %d %%)"), in.soc);
     }
@@ -447,7 +449,9 @@ void Controller::update(const Inputs& in) {
         else { want = true; why = _iccBlocked ? "inv_not_charging" : soc >= P.offSoc ? "to_full" : "charging"; }
     } else {
         want = false;
-        why = *_offWhy ? _offWhy : "idle";
+        // A cap that has let go is no reason any more: "full" while the latch
+        // holds, then just waiting for the ON threshold.
+        why = _full ? "full" : (*_offWhy && strcmp(_offWhy, "cell_cap")) ? _offWhy : "idle";
         if (in.season == Winter && !_full) {
             bool afterFull = !strcmp(_offWhy, "float") || !strcmp(_offWhy, "full") || !strcmp(_offWhy, "cell_cap");
             if (afterFull) {

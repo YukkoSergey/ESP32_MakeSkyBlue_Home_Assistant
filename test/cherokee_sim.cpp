@@ -336,6 +336,24 @@ int main(int argc, char** argv) {
         s.min(5);
         expect("cell_cap_v = 0: rule off", ON(s), s);
     }
+    {
+        // 20.11: cap in the morning, the day's discharge to 78 %, then no top-up before sunset.
+        Sim s(Shoulder);
+        s.in.soc = 55;
+        s.min(20);
+        s.in.soc = 88; s.in.cellMaxV = 3.56f;
+        s.min(2);
+        expect("shoulder: cap -> OFF, full", !ON(s) && WHY(s, "cell_cap") && s.c.full(), s);
+        s.in.cellMaxV = 3.33f; s.in.soc = 85;
+        s.min(5);
+        expect("cap let go at 85 %: reason 'full', not 'cell_cap'", !ON(s) && WHY(s, "full"), s);
+        s.in.soc = 80;
+        s.min(1);
+        expect("80 % (OFF 90 - 10): full cleared, waits ('idle')", !ON(s) && !s.c.full() && WHY(s, "idle"), s);
+        s.in.day = true; s.in.toSunsetMin = 80;
+        s.min(5);   // past the 10-min minimum off time
+        expect("80 min before sunset at 80 % -> ON (sunset)", ON(s) && WHY(s, "sunset"), s);
+    }
 
     printf("12. APL with weak grid -> ON until UPS for 10 min and +2 points\n");
     {

@@ -155,7 +155,8 @@ Local only: LAN Solar Assistant MQTT, no internet / HA / VPS needed. Order:
 4. Stale / frozen SOC → ON.
 5. More than 6 switches an hour → ON for 1 h + alarm `cherokee_flap`.
 6. Cell cap (`cell_cap_v`, default 3.55 V, 0 = off) for 1 min → OFF, the
-   battery counts as full until SOC ≤ ON threshold and cell ≤ 3.45 V.
+   battery counts as full until SOC ≤ max(ON, OFF − 10) and cell ≤ 3.45 V
+   (so a day's discharge re-arms the sunset top-up).
 7. Manual on.
 8. Season logic (SOC %, editable on the web page, NVS key `chcfg`):
 

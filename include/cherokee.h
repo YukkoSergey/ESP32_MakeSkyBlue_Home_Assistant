@@ -132,6 +132,9 @@ public:
     static constexpr uint32_t kIccBlockMs     = 30 * kMin;
     static constexpr uint32_t kCapHoldMs      = 1 * kMin;
     static constexpr float    kFullClearCellV = 3.45f;
+    // 'Full' also lets go this far below the OFF threshold, so a day's discharge
+    // re-arms the sunset / outage top-ups (shoulder: 90 - 10 = 80 %).
+    static constexpr int      kFullClearDrop  = 10;
     static constexpr uint32_t kFloatMs        = 10 * kMin;
     static constexpr float    kFloatA         = 3.0f;
     static constexpr uint32_t kSunMeasureMs   = 3 * kMin;   // chargers off this long before "sun now" means anything
